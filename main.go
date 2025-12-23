@@ -33,8 +33,8 @@ var (
 	sshd_key_key string
 	rate         int
 	maxAuthTries int
-	hostKeyType  string // "rsa" or "ed25519"
 	rsaBits      int    // only used if hostKeyType == "rsa"
+	profileScope string // "host" or "remote_ip"
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -46,8 +46,17 @@ type rateLimitedConn struct {
 	lastUpdate time.Time
 }
 
+// Currently state is not shared between connections
+// multiple attackers can "reset” delays by opening new connections
 type authState struct {
 	attempts int
+}
+
+// Create profile to match banner and Server Version
+type serverProfile struct {
+	ServerVersion string
+	LoginBanner   string
+	HostKeyType   string // "rsa" or "ed25519"
 }
 
 // newRateLimitedConn returns a new rateLimitedConn.
@@ -150,11 +159,6 @@ func logParameters(conn ssh.ConnMetadata) logrus.Fields {
 	}
 }
 
-func authDelay(base, jitter time.Duration) {
-	d := base + time.Duration(rand.Int63n(int64(jitter)))
-	time.Sleep(d)
-}
-
 func HashToInt64(message, key []byte) int64 {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(message)
@@ -171,12 +175,12 @@ func getHost(addr string) string {
 	return host
 }
 
-func getHostKeySigner(host string) (ssh.Signer, error) {
-	seed := HashToInt64([]byte(host), []byte(sshd_key_key))
+func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
+	seed := HashToInt64([]byte(host+":"+keyType), []byte(sshd_key_key))
+	// Fine for honeypot — no security issue. Do not use for real keys.
 	rng := rand.New(rand.NewSource(seed))
 
-	switch hostKeyType {
-
+	switch keyType {
 	case "ed25519":
 		_, priv, err := ed25519.GenerateKey(rng)
 		if err != nil {
@@ -192,51 +196,74 @@ func getHostKeySigner(host string) (ssh.Signer, error) {
 		return ssh.NewSignerFromKey(key)
 
 	default:
-		return nil, errors.New("unsupported SSHD_HOSTKEY_TYPE")
+		return nil, errors.New("unsupported host key type")
 	}
 }
 
-var serverVersions = []string{
-	"SSH-2.0-OpenSSH_7.4",
-	"SSH-2.0-OpenSSH_7.9p1 Debian-10",
-	"SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.5",
-	"SSH-2.0-OpenSSH_8.4",
-	"SSH-2.0-dropbear_2019.78",
+var serverProfiles = []serverProfile{
+	{
+		ServerVersion: "SSH-2.0-OpenSSH_7.4",
+		LoginBanner:   "CentOS Linux 7 (Core)\n\nAll connections are monitored.\n",
+		HostKeyType:   "rsa",
+	},
+	{
+		ServerVersion: "SSH-2.0-OpenSSH_7.9p1 Debian-10",
+		LoginBanner:   "Debian GNU/Linux 10\n\nAuthorized users only.\n",
+		HostKeyType:   "rsa",
+	},
+	{
+		ServerVersion: "SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.5",
+		LoginBanner:   "Ubuntu 20.04.6 LTS\n\nUnauthorized access prohibited.\n",
+		HostKeyType:   "ed25519",
+	},
+	{
+		ServerVersion: "SSH-2.0-OpenSSH_8.4",
+		LoginBanner:   "Debian GNU/Linux 11\n\nAuthorized users only.\n",
+		HostKeyType:   "ed25519",
+	},
+	{
+		ServerVersion: "SSH-2.0-dropbear_2019.78",
+		LoginBanner:   "Welcome to Dropbear SSH Server\n\nUnauthorized access is prohibited.\n",
+		HostKeyType:   "rsa",
+	},
 }
 
-var loginBanners = []string{
-	"Ubuntu 20.04.6 LTS\n\nUnauthorized access prohibited.\n",
-	"Debian GNU/Linux 11\n\nAuthorized users only.\n",
-	"CentOS Linux 7 (Core)\n\nAll connections are monitored.\n",
-	"Warning: This system is for authorized use only.\n",
-	"Welcome to OpenSSH Server\n\nUnauthorized access is prohibited.\n",
-}
-
-func getServerVersion(host string) string {
-	seed := HashToInt64([]byte(host), []byte(sshd_key_key))
+func getServerProfile(host string) serverProfile {
+	seed := HashToInt64([]byte("profile:"+host), []byte(sshd_key_key))
 	if seed < 0 {
 		seed = -seed
 	}
-	return serverVersions[int(seed)%len(serverVersions)]
+	return serverProfiles[int(seed)%len(serverProfiles)]
 }
 
-// Select Banner per host, same host --> same banner
-func getLoginBanner(host string) string {
-	seed := HashToInt64([]byte("banner:"+host), []byte(sshd_key_key))
-	if seed < 0 {
-		seed = -seed
-	}
-	return loginBanners[int(seed)%len(loginBanners)]
-}
-
-func makeSSHConfig(host string) ssh.ServerConfig {
+func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	state := &authState{}
+	// per‑local host profile
+//	profile := getServerProfile(host)
+	// per‑IP profile
+//	profile := getServerProfile(conn.RemoteAddr().String())
+	// Determine the key for profile lookup
+	var profileKey string
+	if profileScope == "remote_ip" {
+		profileKey = conn.RemoteAddr().String()
+	} else { // default "host"
+		profileKey = getHost(conn.LocalAddr().String())
+	}
+
+	profile := getServerProfile(profileKey)
+	// Generate primary host key signer
+	signer, err := getHostKeySigner(profileKey, profile.HostKeyType)
+	if err != nil {
+		logrus.Panic(err)
+	}
+
+	// Capture the actual host key type
+	actualHostKeyType := signer.PublicKey().Type()
 
 	config := ssh.ServerConfig{
 		BannerCallback: func(conn ssh.ConnMetadata) string {
-			// Small delay makes it feel real
 			time.Sleep(time.Duration(100+rand.Intn(200)) * time.Millisecond)
-			return getLoginBanner(host)
+			return profile.LoginBanner
 		},
 
 		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
@@ -247,8 +274,10 @@ func makeSSHConfig(host string) ssh.ServerConfig {
 			time.Sleep(base + jitter)
 
 			logger.WithFields(logParameters(conn)).
-				WithField("password", string(password)).
-				Info("Request with password")
+				WithFields(logrus.Fields{
+					"password": password,
+					"server_key_type": actualHostKeyType,
+				}).Info("Request with password")
 
 			return nil, errAuthenticationFailed
 		},
@@ -262,73 +291,37 @@ func makeSSHConfig(host string) ssh.ServerConfig {
 
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
-					"keytype":     key.Type(),
+					"keytype": key.Type(),
 					"fingerprint": ssh.FingerprintSHA256(key),
+					"server_key_type": actualHostKeyType,
 				}).Info("Request with key")
 
 			return nil, errAuthenticationFailed
 		},
 
-		ServerVersion: getServerVersion(host),
-		MaxAuthTries:      maxAuthTries + rand.Intn(5),
+		ServerVersion: profile.ServerVersion,
+		MaxAuthTries:  maxAuthTries + rand.Intn(5),
 	}
 
-	signer, err := getHostKeySigner(host)
-	if err != nil {
-		logrus.Panic(err)
-	}
 	config.AddHostKey(signer)
+
+	// Compatibility: add RSA fallback if primary is ED25519
+	if profile.HostKeyType == "ed25519" {
+		if rsaSigner, err := getHostKeySigner(profileKey, "rsa"); err == nil {
+			config.AddHostKey(rsaSigner)
+		}
+	}
 
 	return config
 }
 
-// Accept Session Channels but Never Grant Shell
 func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
-	serverConn, chans, reqs, err := ssh.NewServerConn(conn, config)
+	_, _, _, err := ssh.NewServerConn(conn, config)
 	if err != nil {
+		// Auth failed or client closed connection — expected behavior
 		return
 	}
-	logger.WithFields(logParameters(serverConn)).Info("SSH connection established")
-
-	go ssh.DiscardRequests(reqs)
-
-	for ch := range chans {
-		if ch.ChannelType() != "session" {
-			ch.Reject(ssh.UnknownChannelType, "unsupported")
-			continue
-		}
-
-		channel, requests, err := ch.Accept()
-		if err != nil {
-			continue
-		}
-
-		go func(in <-chan *ssh.Request) {
-			for req := range in {
-				switch req.Type {
-
-				case "pty-req":
-					req.Reply(true, nil)
-
-				case "env":
-					req.Reply(true, nil)
-
-				case "exec":
-					logger.WithField("cmd", string(req.Payload)).Info("Exec attempt")
-					req.Reply(false, nil)
-
-				case "shell":
-					// Fake success, no shell
-					req.Reply(true, nil)
-					time.Sleep(2 * time.Second)
-					channel.Close()
-
-				default:
-					req.Reply(false, nil)
-				}
-			}
-		}(requests)
-	}
+	// This should never happen because auth never succeeds
 }
 
 //getEnvWithDefault returns the environment value for key
@@ -357,13 +350,14 @@ func init() {
 	if err != nil {
 		logrus.Fatal("Invalid SSHD_MAX_AUTH_TRIES environment variable")
 	}
-	hostKeyType = getEnvWithDefault("SSHD_HOSTKEY_TYPE", "rsa")
 	rsaBitsStr := getEnvWithDefault("SSHD_RSA_BITS", "3072")
 	rsaBits, err = strconv.Atoi(rsaBitsStr)
 	if err != nil || rsaBits < 2048 {
 		logrus.Fatal("Invalid SSHD_RSA_BITS (must be >= 2048)")
 	}
-	// seed for non-deterministic uses to avoid identical timing patterns across restarts
+	profileScope = getEnvWithDefault("SSHD_PROFILE_SCOPE", "host")
+	// Seed for non-deterministic uses to avoid identical timing patterns across restarts
+	// Fine for delays and banner selection — no security issue.
 	rand.Seed(time.Now().UnixNano())
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
@@ -371,8 +365,8 @@ func init() {
 		"SSHD_KEY_KEY":        sshd_key_key,
 		"SSHD_RATE":           rate,
 		"SSHD_MAX_AUTH_TRIES": maxAuthTries,
-		"SSHD_HOSTKEY_TYPE":   hostKeyType,
 		"SSHD_RSA_BITS":       rsaBitsStr,
+		"SSHD_PROFILE_SCOPE":  profileScope,
 	}).Info("Starting SSH Auth Logger")
 }
 
@@ -390,9 +384,9 @@ func main() {
 		logger.WithFields(connLogParameters(conn)).Info("Connection")
 
 		limitedConn := newRateLimitedConn(conn, rate)
-		host := getHost(conn.LocalAddr().String())
+		//host := getHost(conn.LocalAddr().String())
 
-		config := makeSSHConfig(host) // NEW CONFIG PER CONNECTION
+		config := makeSSHConfig(conn) // NEW CONFIG PER CONNECTION
 		go handleConnection(limitedConn, &config)
 	}
 
