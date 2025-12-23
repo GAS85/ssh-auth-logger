@@ -1,3 +1,5 @@
+# SSH Auth Logger
+
 A low/zero interaction ssh authentication logging honeypot
 
 ## Interesting features
@@ -61,20 +63,23 @@ docker run -t -i --rm  -p 2222:2222 justinazoff/ssh-auth-logger
 
 Docker compose example:
 
-```shell
+```yaml
 services:
   ssh-auth-logger:
     image: justinazoff/ssh-auth-logger:latest
     container_name: ssh-auth-logger
     environment:
-      - SSHD_RATE=120    # bits per second, emulate very slow connection
-      - SSHD_BIND=:2222  # Port and interface to listen
-      - TZ=Europe/Berlin # You can set Time Zone to see logs with your local time
+      # Following are default values
+      - SSHD_RATE=120                         # bits per second, emulate very slow connection
+      - SSHD_BIND=:22                         # Port and interface to listen
+      - SSHD_KEY_KEY="Take me to your leader" # It's a secret key that is used to generate a deterministic hash value for a given host IP address
+      - SSHD_MAX_AUTH_TRIES=6                 # The minimum number of authentication attempts allowed
+      - TZ=Europe/Berlin                      # You can set Time Zone to see logs with your local time
     volumes:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log
     ports:
-     - 2222:2222 # SSH Auth Logger
+     - 2222:22 # SSH Auth Logger
     restart: unless-stopped
     deploy:
       resources:

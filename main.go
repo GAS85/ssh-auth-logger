@@ -31,6 +31,7 @@ var (
 	sshd_bind    string
 	sshd_key_key string
 	rate         int
+	maxAuthTries int
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -40,6 +41,10 @@ type rateLimitedConn struct {
 	bufferSize int // buffer size for token bucket algorithm
 	tokens     int // current tokens
 	lastUpdate time.Time
+}
+
+type authState struct {
+	attempts int
 }
 
 // newRateLimitedConn returns a new rateLimitedConn.
@@ -142,11 +147,17 @@ func logParameters(conn ssh.ConnMetadata) logrus.Fields {
 	}
 }
 
+func authDelay(base, jitter time.Duration) {
+	d := base + time.Duration(rand.Int63n(int64(jitter)))
+	time.Sleep(d)
+}
+
 func authenticatePassword(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-	fields := logrus.Fields{
-		"password": string(password),
-	}
-	logger.WithFields(logParameters(conn)).WithFields(fields).Info("Request with password")
+	// Realistic delay (200–900ms)
+	authDelay(200*time.Millisecond, 700*time.Millisecond)
+	logger.WithFields(logParameters(conn)).
+		WithField("password", string(password)).
+		Info("Request with password")
 	return nil, errAuthenticationFailed
 }
 
@@ -175,17 +186,16 @@ func getHost(addr string) string {
 	return host
 }
 
-func getKey(host string) (*rsa.PrivateKey, error) {
-	logrus.WithFields(logrus.Fields{"addr": host}).Debug("Generating host key")
-
+func getKey(host string) (ssh.Signer, error) {
 	randomSeed := HashToInt64([]byte(host), []byte(sshd_key_key))
 	randomSource := rand.New(rand.NewSource(randomSeed))
 
-	key, err := rsa.GenerateKey(randomSource, 1024)
+	key, err := rsa.GenerateKey(randomSource, 3072)
 	if err != nil {
-		return key, err
+		return nil, err
 	}
-	return key, err
+
+	return ssh.NewSignerFromKey(key)
 }
 
 var serverVersions = []string{
@@ -205,22 +215,49 @@ func getServerVersion(host string) string {
 }
 
 func makeSSHConfig(host string) ssh.ServerConfig {
+	state := &authState{}
+
 	config := ssh.ServerConfig{
-		PasswordCallback:  authenticatePassword,
-		PublicKeyCallback: authenticateKey,
-		ServerVersion:     getServerVersion(host),
-		MaxAuthTries:      3,
+		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			state.attempts++
+
+			base := time.Duration(200*state.attempts) * time.Millisecond
+			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
+			time.Sleep(base + jitter)
+
+			logger.WithFields(logParameters(conn)).
+				WithField("password", string(password)).
+				Info("Request with password")
+
+			return nil, errAuthenticationFailed
+		},
+
+		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			state.attempts++
+
+			base := time.Duration(200*state.attempts) * time.Millisecond
+			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
+			time.Sleep(base + jitter)
+
+			logger.WithFields(logParameters(conn)).
+				WithFields(logrus.Fields{
+					"keytype":     key.Type(),
+					"fingerprint": ssh.FingerprintSHA256(key),
+				}).Info("Request with key")
+
+			return nil, errAuthenticationFailed
+		},
+
+		ServerVersion: getServerVersion(host),
+		MaxAuthTries:      maxAuthTries + rand.Intn(5),
 	}
 
-	privateKey, err := getKey(host)
+	signer, err := getKey(host)
 	if err != nil {
 		logrus.Panic(err)
 	}
-	hostPrivateKeySigner, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		logrus.Panic(err)
-	}
-	config.AddHostKey(hostPrivateKeySigner)
+	config.AddHostKey(signer)
+
 	return config
 }
 
@@ -250,14 +287,19 @@ func init() {
 	var err error
 	rate, err = strconv.Atoi(rateStr)
 	if err != nil {
-		logrus.Fatal("Invalid RATE environment variable")
+		logrus.Fatal("Invalid SSHD_RATE environment variable")
 	}
-
+	maxAuthTriesStr := getEnvWithDefault("SSHD_MAX_AUTH_TRIES", "6") // default amount of tries is 6-10.
+	maxAuthTries, err = strconv.Atoi(maxAuthTriesStr)
+	if err != nil {
+		logrus.Fatal("Invalid SSHD_MAX_AUTH_TRIES environment variable")
+	}
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
-		"SSHD_BIND":    sshd_bind,
-		"SSHD_KEY_KEY": sshd_key_key,
-		"SSHD_RATE":    rate,
+		"SSHD_BIND":           sshd_bind,
+		"SSHD_KEY_KEY":        sshd_key_key,
+		"SSHD_RATE":           rate,
+		"SSHD_MAX_AUTH_TRIES": maxAuthTries,
 	}).Info("Starting SSH Auth Logger")
 }
 
