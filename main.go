@@ -317,11 +317,14 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 
 func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	_, _, _, err := ssh.NewServerConn(conn, config)
+	if err == nil {
+		// This should never happen because auth never succeeds
+		logrus.Panic("Successful login? why!?")
+	}
 	if err != nil {
 		// Auth failed or client closed connection — expected behavior
 		return
 	}
-	// This should never happen because auth never succeeds
 }
 
 //getEnvWithDefault returns the environment value for key
