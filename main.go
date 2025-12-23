@@ -10,8 +10,8 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"time"
 	"strconv"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -189,16 +189,19 @@ func getKey(host string) (*rsa.PrivateKey, error) {
 }
 
 var serverVersions = []string{
-	"SSH-2.0-libssh-0.6.1",
+	"SSH-2.0-OpenSSH_7.4",
+	"SSH-2.0-OpenSSH_7.9p1 Debian-10",
+	"SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.5",
+	"SSH-2.0-OpenSSH_8.4",
+	"SSH-2.0-dropbear_2019.78",
 }
 
 func getServerVersion(host string) string {
-	randomSeed := HashToInt64([]byte(host), []byte(sshd_key_key))
-	if randomSeed < 0 {
-		randomSeed = -randomSeed
+	seed := HashToInt64([]byte(host), []byte(sshd_key_key))
+	if seed < 0 {
+		seed = -seed
 	}
-	n := int(randomSeed) % len(serverVersions)
-	return serverVersions[n]
+	return serverVersions[int(seed)%len(serverVersions)]
 }
 
 func makeSSHConfig(host string) ssh.ServerConfig {
