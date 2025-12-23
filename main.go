@@ -340,6 +340,8 @@ func init() {
 	if err != nil || rsaBits < 2048 {
 		logrus.Fatal("Invalid SSHD_RSA_BITS (must be >= 2048)")
 	}
+	// seed for non-deterministic uses to avoid identical timing patterns across restarts
+	rand.Seed(time.Now().UnixNano())
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
 		"SSHD_BIND":           sshd_bind,
@@ -352,7 +354,6 @@ func init() {
 }
 
 func main() {
-	sshConfigMap := make(map[string]ssh.ServerConfig)
 	socket, err := net.Listen("tcp", sshd_bind)
 	if err != nil {
 		panic(err)
@@ -362,16 +363,14 @@ func main() {
 		if err != nil {
 			log.Panic(err)
 		}
+
 		logger.WithFields(connLogParameters(conn)).Info("Connection")
 
 		limitedConn := newRateLimitedConn(conn, rate)
-
 		host := getHost(conn.LocalAddr().String())
-		config, existed := sshConfigMap[host]
-		if !existed {
-			config = makeSSHConfig(host)
-			sshConfigMap[host] = config
-		}
+
+		config := makeSSHConfig(host) // NEW CONFIG PER CONNECTION
 		go handleConnection(limitedConn, &config)
 	}
+
 }
