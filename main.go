@@ -204,6 +204,14 @@ var serverVersions = []string{
 	"SSH-2.0-dropbear_2019.78",
 }
 
+var loginBanners = []string{
+	"Ubuntu 20.04.6 LTS\n\nUnauthorized access prohibited.\n",
+	"Debian GNU/Linux 11\n\nAuthorized users only.\n",
+	"CentOS Linux 7 (Core)\n\nAll connections are monitored.\n",
+	"Warning: This system is for authorized use only.\n",
+	"Welcome to OpenSSH Server\n\nUnauthorized access is prohibited.\n",
+}
+
 func getServerVersion(host string) string {
 	seed := HashToInt64([]byte(host), []byte(sshd_key_key))
 	if seed < 0 {
@@ -212,10 +220,25 @@ func getServerVersion(host string) string {
 	return serverVersions[int(seed)%len(serverVersions)]
 }
 
+// Select Banner per host, same host --> same banner
+func getLoginBanner(host string) string {
+	seed := HashToInt64([]byte("banner:"+host), []byte(sshd_key_key))
+	if seed < 0 {
+		seed = -seed
+	}
+	return loginBanners[int(seed)%len(loginBanners)]
+}
+
 func makeSSHConfig(host string) ssh.ServerConfig {
 	state := &authState{}
 
 	config := ssh.ServerConfig{
+		BannerCallback: func(conn ssh.ConnMetadata) string {
+			// Small delay makes it feel real
+			time.Sleep(time.Duration(100+rand.Intn(200)) * time.Millisecond)
+			return getLoginBanner(host)
+		},
+
 		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 			state.attempts++
 
