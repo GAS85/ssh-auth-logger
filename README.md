@@ -1,5 +1,3 @@
-# SSH Auth Logger
-
 A low/zero interaction ssh authentication logging honeypot
 
 ## Interesting features
@@ -64,6 +62,10 @@ docker run -t -i --rm  -p 2222:2222 justinazoff/ssh-auth-logger
 Docker compose example:
 
 ```yaml
+networks:
+  isolated_net:
+    driver: bridge
+
 services:
   ssh-auth-logger:
     image: justinazoff/ssh-auth-logger:latest
@@ -74,12 +76,17 @@ services:
       - SSHD_BIND=:22                         # Port and interface to listen
       - SSHD_KEY_KEY="Take me to your leader" # It's a secret key that is used to generate a deterministic hash value for a given host IP address
       - SSHD_MAX_AUTH_TRIES=6                 # The minimum number of authentication attempts allowed
+      - SSHD_HOSTKEY_TYPE=rsa                 # Key type, could be 'rsa' or 'ed25519'
+      - SSHD_RSA_BITS=3072                    # If you use 'rsa' you can also set RSA key size, 2048, 3072, 4096 (very rare)
       - TZ=Europe/Berlin                      # You can set Time Zone to see logs with your local time
     volumes:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log
     ports:
-     - 2222:22 # SSH Auth Logger
+     - 2222:2222 # SSH Auth Logger
+    networks:
+      # Use isolated docker network, so that other containers will be not reachable from it
+      - isolated_net
     restart: unless-stopped
     deploy:
       resources:
@@ -87,7 +94,8 @@ services:
           cpus: '0.50'
           memory: 100M
     healthcheck:
-      test: wget -v localhost$SSHD_BIND --no-verbose --tries=1 --spider || exit 1
+      # Will test if port is still open AND log file was not 
+      test: wget -v localhost$SSHD_BIND --no-verbose --tries=1 --spider && test -s /var/log/ssh-auth-logger.log || exit 1
       interval: 5m00s
       timeout: 5s
       retries: 2

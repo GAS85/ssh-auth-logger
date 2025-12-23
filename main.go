@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -32,6 +33,8 @@ var (
 	sshd_key_key string
 	rate         int
 	maxAuthTries int
+	hostKeyType  string // "rsa" or "ed25519"
+	rsaBits      int    // only used if hostKeyType == "rsa"
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -152,24 +155,6 @@ func authDelay(base, jitter time.Duration) {
 	time.Sleep(d)
 }
 
-func authenticatePassword(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-	// Realistic delay (200–900ms)
-	authDelay(200*time.Millisecond, 700*time.Millisecond)
-	logger.WithFields(logParameters(conn)).
-		WithField("password", string(password)).
-		Info("Request with password")
-	return nil, errAuthenticationFailed
-}
-
-func authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-	fields := logrus.Fields{
-		"keytype":     key.Type(),
-		"fingerprint": ssh.FingerprintSHA256(key),
-	}
-	logger.WithFields(logParameters(conn)).WithFields(fields).Info("Request with key")
-	return nil, errAuthenticationFailed
-}
-
 func HashToInt64(message, key []byte) int64 {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(message)
@@ -186,16 +171,29 @@ func getHost(addr string) string {
 	return host
 }
 
-func getKey(host string) (ssh.Signer, error) {
-	randomSeed := HashToInt64([]byte(host), []byte(sshd_key_key))
-	randomSource := rand.New(rand.NewSource(randomSeed))
+func getHostKeySigner(host string) (ssh.Signer, error) {
+	seed := HashToInt64([]byte(host), []byte(sshd_key_key))
+	rng := rand.New(rand.NewSource(seed))
 
-	key, err := rsa.GenerateKey(randomSource, 3072)
-	if err != nil {
-		return nil, err
+	switch hostKeyType {
+
+	case "ed25519":
+		_, priv, err := ed25519.GenerateKey(rng)
+		if err != nil {
+			return nil, err
+		}
+		return ssh.NewSignerFromKey(priv)
+
+	case "rsa":
+		key, err := rsa.GenerateKey(rng, rsaBits)
+		if err != nil {
+			return nil, err
+		}
+		return ssh.NewSignerFromKey(key)
+
+	default:
+		return nil, errors.New("unsupported SSHD_HOSTKEY_TYPE")
 	}
-
-	return ssh.NewSignerFromKey(key)
 }
 
 var serverVersions = []string{
@@ -252,7 +250,7 @@ func makeSSHConfig(host string) ssh.ServerConfig {
 		MaxAuthTries:      maxAuthTries + rand.Intn(5),
 	}
 
-	signer, err := getKey(host)
+	signer, err := getHostKeySigner(host)
 	if err != nil {
 		logrus.Panic(err)
 	}
@@ -261,10 +259,52 @@ func makeSSHConfig(host string) ssh.ServerConfig {
 	return config
 }
 
+// Accept Session Channels but Never Grant Shell
 func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
-	_, _, _, err := ssh.NewServerConn(conn, config)
-	if err == nil {
-		logrus.Panic("Successful login? why!?")
+	serverConn, chans, reqs, err := ssh.NewServerConn(conn, config)
+	if err != nil {
+		return
+	}
+	logger.WithFields(logParameters(serverConn)).Info("SSH connection established")
+
+	go ssh.DiscardRequests(reqs)
+
+	for ch := range chans {
+		if ch.ChannelType() != "session" {
+			ch.Reject(ssh.UnknownChannelType, "unsupported")
+			continue
+		}
+
+		channel, requests, err := ch.Accept()
+		if err != nil {
+			continue
+		}
+
+		go func(in <-chan *ssh.Request) {
+			for req := range in {
+				switch req.Type {
+
+				case "pty-req":
+					req.Reply(true, nil)
+
+				case "env":
+					req.Reply(true, nil)
+
+				case "exec":
+					logger.WithField("cmd", string(req.Payload)).Info("Exec attempt")
+					req.Reply(false, nil)
+
+				case "shell":
+					// Fake success, no shell
+					req.Reply(true, nil)
+					time.Sleep(2 * time.Second)
+					channel.Close()
+
+				default:
+					req.Reply(false, nil)
+				}
+			}
+		}(requests)
 	}
 }
 
@@ -294,12 +334,20 @@ func init() {
 	if err != nil {
 		logrus.Fatal("Invalid SSHD_MAX_AUTH_TRIES environment variable")
 	}
+	hostKeyType = getEnvWithDefault("SSHD_HOSTKEY_TYPE", "rsa")
+	rsaBitsStr := getEnvWithDefault("SSHD_RSA_BITS", "3072")
+	rsaBits, err = strconv.Atoi(rsaBitsStr)
+	if err != nil || rsaBits < 2048 {
+		logrus.Fatal("Invalid SSHD_RSA_BITS (must be >= 2048)")
+	}
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
 		"SSHD_BIND":           sshd_bind,
 		"SSHD_KEY_KEY":        sshd_key_key,
 		"SSHD_RATE":           rate,
 		"SSHD_MAX_AUTH_TRIES": maxAuthTries,
+		"SSHD_HOSTKEY_TYPE":   hostKeyType,
+		"SSHD_RSA_BITS":       rsaBitsStr,
 	}).Info("Starting SSH Auth Logger")
 }
 
