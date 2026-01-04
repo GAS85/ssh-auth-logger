@@ -35,6 +35,7 @@ var (
 	maxAuthTries int
 	rsaBits      int    // only used if hostKeyType == "rsa"
 	profileScope string // "host" or "remote_ip"
+	sendBanner   bool
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -261,11 +262,6 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	actualHostKeyType := signer.PublicKey().Type()
 
 	config := ssh.ServerConfig{
-		BannerCallback: func(conn ssh.ConnMetadata) string {
-			time.Sleep(time.Duration(100+rand.Intn(200)) * time.Millisecond)
-			return profile.LoginBanner
-		},
-
 		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 			state.attempts++
 
@@ -301,6 +297,14 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 
 		ServerVersion: profile.ServerVersion,
 		MaxAuthTries:  maxAuthTries + rand.Intn(5),
+	}
+
+	// 🔐 Banner only if enabled
+	if sendBanner {
+		config.BannerCallback = func(conn ssh.ConnMetadata) string {
+			time.Sleep(time.Duration(100+rand.Intn(200)) * time.Millisecond)
+			return profile.LoginBanner
+		}
 	}
 
 	config.AddHostKey(signer)
@@ -362,6 +366,9 @@ func init() {
 	// Seed for non-deterministic uses to avoid identical timing patterns across restarts
 	// Fine for delays and banner selection — no security issue.
 	rand.Seed(time.Now().UnixNano())
+	// Banner sending option
+	sendBannerStr := getEnvWithDefault("SSHD_SEND_BANNER", "false")
+	sendBanner = sendBannerStr == "1" || sendBannerStr == "true" || sendBannerStr == "yes"
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
 		"SSHD_BIND":           sshd_bind,
@@ -370,6 +377,7 @@ func init() {
 		"SSHD_MAX_AUTH_TRIES": maxAuthTries,
 		"SSHD_RSA_BITS":       rsaBitsStr,
 		"SSHD_PROFILE_SCOPE":  profileScope,
+		"SSHD_SEND_BANNER":    sendBanner,
 	}).Info("Starting SSH Auth Logger")
 }
 
@@ -387,7 +395,6 @@ func main() {
 		logger.WithFields(connLogParameters(conn)).Info("Connection")
 
 		limitedConn := newRateLimitedConn(conn, rate)
-		//host := getHost(conn.LocalAddr().String())
 
 		config := makeSSHConfig(conn) // NEW CONFIG PER CONNECTION
 		go handleConnection(limitedConn, &config)
