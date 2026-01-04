@@ -78,6 +78,7 @@ services:
 #      - SSHD_RSA_BITS=3072                    # If you use 'rsa' you can also set RSA key size, 2048, 3072, 4096 (very rare)
 #      - SSHD_PROFILE_SCOPE=remote_ip          # Can be 'remote_ip' (each remote IP gets its own profile, simulating per-attacker behavior.), or anything else for 'host' (the same local host always gets the same profile).
 #      - SSHD_SEND_BANNER=false                # Send SSH Login Banner before Password prompt  
+#      - SSHD_LOG_CLEAR_PASSWORD=true          # Log Passwords as clear text or Base64 coded  
       - TZ=Europe/Berlin                      # You can set Time Zone to see logs with your local time
     volumes:
       # Mount log file if needed

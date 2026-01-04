@@ -36,6 +36,7 @@ var (
 	rsaBits      int    // only used if hostKeyType == "rsa"
 	profileScope string // "host" or "remote_ip"
 	sendBanner   bool
+	logClearPassword bool
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -269,9 +270,14 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
 			time.Sleep(base + jitter)
 
+			var loggedPassword any = password
+			if logClearPassword {
+				loggedPassword = string(password)
+			}
+
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
-					"password": password,
+					"password":        loggedPassword,
 					"server_key_type": actualHostKeyType,
 				}).Info("Request with password")
 
@@ -369,15 +375,19 @@ func init() {
 	// Banner sending option
 	sendBannerStr := getEnvWithDefault("SSHD_SEND_BANNER", "false")
 	sendBanner = sendBannerStr == "1" || sendBannerStr == "true" || sendBannerStr == "yes"
+	logClearPasswordStr := getEnvWithDefault("SSHD_LOG_CLEAR_PASSWORD", "true")
+	logClearPassword = logClearPasswordStr == "1" || logClearPasswordStr == "true" || logClearPasswordStr == "yes"
+
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
-		"SSHD_BIND":           sshd_bind,
-		"SSHD_KEY_KEY":        sshd_key_key,
-		"SSHD_RATE":           rate,
-		"SSHD_MAX_AUTH_TRIES": maxAuthTries,
-		"SSHD_RSA_BITS":       rsaBitsStr,
-		"SSHD_PROFILE_SCOPE":  profileScope,
-		"SSHD_SEND_BANNER":    sendBanner,
+		"SSHD_BIND":               sshd_bind,
+		"SSHD_KEY_KEY":            sshd_key_key,
+		"SSHD_RATE":               rate,
+		"SSHD_MAX_AUTH_TRIES":     maxAuthTries,
+		"SSHD_RSA_BITS":           rsaBitsStr,
+		"SSHD_PROFILE_SCOPE":      profileScope,
+		"SSHD_SEND_BANNER":        sendBanner,
+		"SSHD_LOG_CLEAR_PASSWORD": logClearPassword,
 	}).Info("Starting SSH Auth Logger")
 }
 
