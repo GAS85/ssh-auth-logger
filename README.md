@@ -53,8 +53,10 @@ sudo setcap cap_net_bind_service=+ep ~/go/bin/ssh-auth-logger
 
 ## Run with docker
 
+Bind to port 2222 in a host machine
+
 ```shell
-docker run -t -i --rm  -p 2222:2222 justinazoff/ssh-auth-logger
+docker run -t -i --rm  -p 2222:22 justinazoff/ssh-auth-logger
 ```
 
 Docker compose example:
@@ -72,11 +74,11 @@ services:
     environment:
       # Following are default values
 #      - SSHD_RATE=120                         # bits per second, emulate very slow connection
-#      - SSHD_BIND=:2222                       # Port and interface to listen
+#      - SSHD_BIND=:22                         # Port and interface to listen
 #      - SSHD_KEY_KEY="Take me to your leader" # It's a secret key that is used to generate a deterministic hash value for a given host IP address
 #      - SSHD_MAX_AUTH_TRIES=6                 # The minimum number of authentication attempts allowed
 #      - SSHD_RSA_BITS=3072                    # If you use 'rsa' you can also set RSA key size, 2048, 3072, 4096 (very rare)
-#      - SSHD_PROFILE_SCOPE=remote_ip          # Can be 'remote_ip' (each remote IP gets its own profile, simulating per-attacker behavior.), or anything else for 'host' (the same local host always gets the same profile).
+#      - SSHD_PROFILE_SCOPE=host               # Can be 'remote_ip' (each remote IP gets its own profile, simulating per-attacker behavior.), or anything else for 'host' (the same local host always gets the same profile, e.g. binding to 0.0.0.0:22 will always select the same Profile).
 #      - SSHD_SEND_BANNER=false                # Send SSH Login Banner before Password prompt  
 #      - SSHD_LOG_CLEAR_PASSWORD=true          # Log Passwords as clear text or Base64 coded  
       - TZ=Europe/Berlin                      # You can set Time Zone to see logs with your local time
@@ -84,7 +86,7 @@ services:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log
     ports:
-     - 2222:2222 # SSH Auth Logger
+     - 2222:22 # SSH Auth Logger
     networks:
       # Use isolated docker network, so that other containers will be not reachable from it
       - isolated_net
