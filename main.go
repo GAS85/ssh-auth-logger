@@ -247,7 +247,11 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	// Determine the key for profile lookup
 	var profileKey string
 	if profileScope == "remote_ip" {
-		profileKey = conn.RemoteAddr().String()
+		host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+		if err != nil {
+			host = conn.RemoteAddr().String() // fallback, should not happen
+		}
+		profileKey = host
 	} else { // default "host"
 		profileKey = getHost(conn.LocalAddr().String())
 	}
