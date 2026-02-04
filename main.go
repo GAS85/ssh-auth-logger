@@ -353,6 +353,7 @@ func getEnvWithDefault(key, fallback string) string {
 	return value
 }
 
+// parseAllowedFields parses a comma-separated list of allowed fields
 func parseAllowedFields(env string) map[string]bool {
 	fields := make(map[string]bool)
 	for _, f := range strings.Split(env, ",") {
@@ -369,6 +370,7 @@ type FilteredJSONFormatter struct {
 	Base    *logrus.JSONFormatter
 }
 
+// Format filters the log entry to include only allowed fields
 func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	// Avoid null pointer if Base is not set
 	base := f.Base
