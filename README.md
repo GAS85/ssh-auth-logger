@@ -79,8 +79,9 @@ services:
 #      - SSHD_MAX_AUTH_TRIES=6                 # The minimum number of authentication attempts allowed
 #      - SSHD_RSA_BITS=3072                    # If you use 'rsa' you can also set RSA key size, 2048, 3072, 4096 (very rare)
 #      - SSHD_PROFILE_SCOPE=host               # Can be 'remote_ip' (each remote IP gets its own profile, simulating per-attacker behavior.), or anything else for 'host' (the same local host always gets the same profile, e.g. binding to 0.0.0.0:22 will always select the same Profile).
-#      - SSHD_SEND_BANNER=false                # Send SSH Login Banner before Password prompt  
-#      - SSHD_LOG_CLEAR_PASSWORD=true          # Log Passwords as clear text or Base64 coded  
+#      - SSHD_SEND_BANNER=false                # Send SSH Login Banner before Password prompt
+#      - SSHD_LOG_CLEAR_PASSWORD=true          # Log Passwords as clear text or Base64 coded
+#      - SSHD_LOGS_FILTER=""                   # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product"
       - TZ=Europe/Berlin                      # You can set Time Zone to see logs with your local time
     volumes:
       # Mount log file if needed

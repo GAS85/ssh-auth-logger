@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -27,6 +28,7 @@ var commonFields = logrus.Fields{
 	"product":                appName,
 }
 var logger = logrus.WithFields(commonFields)
+var allowedLogFields map[string]bool
 
 var (
 	sshd_bind    string
@@ -351,6 +353,47 @@ func getEnvWithDefault(key, fallback string) string {
 	return value
 }
 
+// parseAllowedFields parses a comma-separated list of allowed fields
+func parseAllowedFields(env string) map[string]bool {
+	fields := make(map[string]bool)
+	for _, f := range strings.Split(env, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			fields[f] = true
+		}
+	}
+	return fields
+}
+
+type FilteredJSONFormatter struct {
+	Allowed map[string]bool
+	Base    *logrus.JSONFormatter
+}
+
+// Format filters the log entry to include only allowed fields
+func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	// Avoid null pointer if Base is not set
+	base := f.Base
+	if base == nil {
+		base = &logrus.JSONFormatter{}
+	}
+
+	filtered := logrus.Fields{}
+
+	// Filter ONLY structured fields
+	for k, v := range entry.Data {
+		if f.Allowed[k] {
+			filtered[k] = v
+		}
+	}
+
+	// Clone entry safely
+	newEntry := *entry
+	newEntry.Data = filtered
+
+	return f.Base.Format(&newEntry)
+}
+
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
@@ -381,6 +424,8 @@ func init() {
 	sendBanner = sendBannerStr == "1" || sendBannerStr == "true" || sendBannerStr == "yes"
 	logClearPasswordStr := getEnvWithDefault("SSHD_LOG_CLEAR_PASSWORD", "true")
 	logClearPassword = logClearPasswordStr == "1" || logClearPasswordStr == "true" || logClearPasswordStr == "yes"
+	// Comma-separated list of allowed fields, "" means all, " " means none
+	logsEnv := getEnvWithDefault("SSHD_LOGS_FILTER", "")
 
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
@@ -392,7 +437,27 @@ func init() {
 		"SSHD_PROFILE_SCOPE":      profileScope,
 		"SSHD_SEND_BANNER":        sendBanner,
 		"SSHD_LOG_CLEAR_PASSWORD": logClearPassword,
+		"SSHD_LOGS_FILTER":	       logsEnv,
 	}).Info("Starting SSH Auth Logger")
+
+	// Configure allowed log fields from environment variable
+	if logsEnv != "" {
+		allowedLogFields = parseAllowedFields(logsEnv)
+		logrus.SetFormatter(&FilteredJSONFormatter{
+			Allowed: allowedLogFields,
+			Base: &logrus.JSONFormatter{
+				TimestampFormat: time.RFC3339Nano,
+			},
+		})
+	}
+
+	logsEnv, isSet := os.LookupEnv("SSHD_LOGS_FILTER")
+	if isSet {
+		allowedLogFields = parseAllowedFields(logsEnv)
+		if len(allowedLogFields) == 0 {
+			logrus.Warn("SSHD_LOGS_FILTER is set but empty; no structured fields will be logged")
+		}
+	}
 }
 
 func main() {
