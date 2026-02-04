@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -27,6 +28,7 @@ var commonFields = logrus.Fields{
 	"product":                appName,
 }
 var logger = logrus.WithFields(commonFields)
+var allowedLogFields map[string]bool
 
 var (
 	sshd_bind    string
@@ -351,8 +353,68 @@ func getEnvWithDefault(key, fallback string) string {
 	return value
 }
 
+func parseAllowedFields(env string) map[string]bool {
+	fields := make(map[string]bool)
+	for _, f := range strings.Split(env, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			fields[f] = true
+		}
+	}
+	return fields
+}
+
+type FilteredJSONFormatter struct {
+	Allowed map[string]bool
+}
+
+func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	data := make(logrus.Fields)
+
+	// Copy only allowed structured fields
+	for k, v := range entry.Data {
+		if f.Allowed[k] {
+			data[k] = v
+		}
+	}
+
+	// Standard logrus fields
+	if f.Allowed["level"] {
+		data["level"] = entry.Level.String()
+	}
+	if f.Allowed["msg"] {
+		data["msg"] = entry.Message
+	}
+	if f.Allowed["time"] {
+		data["time"] = entry.Time.UTC().Format(time.RFC3339Nano)
+	}
+
+	// Reuse JSON formatter for encoding
+	jf := &logrus.JSONFormatter{
+		DisableTimestamp: true, // we handle time manually
+	}
+	return jf.Format(&logrus.Entry{
+		Data:    data,
+		Level:   entry.Level,
+		Message: entry.Message,
+		Time:    entry.Time,
+	})
+}
+
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
+	// Configure allowed log fields from environment variable
+
+	logsEnv := getEnvWithDefault("SSHD_LOGS_FILTER", "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product,level,msg,timestamp")
+
+	if logsEnv != "" {
+		allowedLogFields = parseAllowedFields(logsEnv)
+		logrus.SetFormatter(&FilteredJSONFormatter{
+			Allowed: allowedLogFields,
+		})
+	} else {
+		logrus.SetFormatter(&logrus.JSONFormatter{})
+	}
 
 	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
 	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", "Take me to your leader")
