@@ -366,55 +366,34 @@ func parseAllowedFields(env string) map[string]bool {
 
 type FilteredJSONFormatter struct {
 	Allowed map[string]bool
+	Base    *logrus.JSONFormatter
 }
 
 func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	data := make(logrus.Fields)
+	// Avoid null pointer if Base is not set
+	base := f.Base
+	if base == nil {
+		base = &logrus.JSONFormatter{}
+	}
 
-	// Copy only allowed structured fields
+	filtered := logrus.Fields{}
+
+	// Filter ONLY structured fields
 	for k, v := range entry.Data {
 		if f.Allowed[k] {
-			data[k] = v
+			filtered[k] = v
 		}
 	}
 
-	// Standard logrus fields
-	if f.Allowed["level"] {
-		data["level"] = entry.Level.String()
-	}
-	if f.Allowed["msg"] {
-		data["msg"] = entry.Message
-	}
-	if f.Allowed["time"] {
-		data["time"] = entry.Time.UTC().Format(time.RFC3339Nano)
-	}
+	// Clone entry safely
+	newEntry := *entry
+	newEntry.Data = filtered
 
-	// Reuse JSON formatter for encoding
-	jf := &logrus.JSONFormatter{
-		DisableTimestamp: true, // we handle time manually
-	}
-	return jf.Format(&logrus.Entry{
-		Data:    data,
-		Level:   entry.Level,
-		Message: entry.Message,
-		Time:    entry.Time,
-	})
+	return f.Base.Format(&newEntry)
 }
 
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
-	// Configure allowed log fields from environment variable
-
-	logsEnv := getEnvWithDefault("SSHD_LOGS_FILTER", "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product,level,msg,timestamp")
-
-	if logsEnv != "" {
-		allowedLogFields = parseAllowedFields(logsEnv)
-		logrus.SetFormatter(&FilteredJSONFormatter{
-			Allowed: allowedLogFields,
-		})
-	} else {
-		logrus.SetFormatter(&logrus.JSONFormatter{})
-	}
 
 	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
 	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", "Take me to your leader")
@@ -443,6 +422,8 @@ func init() {
 	sendBanner = sendBannerStr == "1" || sendBannerStr == "true" || sendBannerStr == "yes"
 	logClearPasswordStr := getEnvWithDefault("SSHD_LOG_CLEAR_PASSWORD", "true")
 	logClearPassword = logClearPasswordStr == "1" || logClearPasswordStr == "true" || logClearPasswordStr == "yes"
+	// Comma-separated list of allowed fields, "" means all, " " means none
+	logsEnv := getEnvWithDefault("SSHD_LOGS_FILTER", "")
 
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
@@ -454,7 +435,27 @@ func init() {
 		"SSHD_PROFILE_SCOPE":      profileScope,
 		"SSHD_SEND_BANNER":        sendBanner,
 		"SSHD_LOG_CLEAR_PASSWORD": logClearPassword,
+		"SSHD_LOGS_FILTER":	       logsEnv,
 	}).Info("Starting SSH Auth Logger")
+
+	// Configure allowed log fields from environment variable
+	if logsEnv != "" {
+		allowedLogFields = parseAllowedFields(logsEnv)
+		logrus.SetFormatter(&FilteredJSONFormatter{
+			Allowed: allowedLogFields,
+			Base: &logrus.JSONFormatter{
+				TimestampFormat: time.RFC3339Nano,
+			},
+		})
+	}
+
+	logsEnv, isSet := os.LookupEnv("SSHD_LOGS_FILTER")
+	if isSet {
+		allowedLogFields = parseAllowedFields(logsEnv)
+		if len(allowedLogFields) == 0 {
+			logrus.Warn("SSHD_LOGS_FILTER is set but empty; no structured fields will be logged")
+		}
+	}
 }
 
 func main() {
