@@ -46,7 +46,5 @@ jobs:
             VCS_REF=${{ steps.meta.outputs.VCS_REF }}
             BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
           tags: |
-#            justinazoff/ssh-auth-logger:${{ steps.tag.outputs.TAG }}
-#            justinazoff/ssh-auth-logger:latest
             gas85/ssh-auth-logger:${{ steps.meta.outputs.VERSION }}
             gas85/ssh-auth-logger:latest
