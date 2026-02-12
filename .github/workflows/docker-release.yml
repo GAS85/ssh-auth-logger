@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - "v*.*.*" # triggers on tags like v1.0.0
-#    branches: ["master"]
 
 jobs:
   build-and-push:
@@ -46,5 +45,5 @@ jobs:
             VCS_REF=${{ steps.meta.outputs.VCS_REF }}
             BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
           tags: |
-            gas85/ssh-auth-logger:${{ steps.meta.outputs.VERSION }}
-            gas85/ssh-auth-logger:latest
+            justinazoff/ssh-auth-logger:${{ steps.meta.outputs.VERSION }}
+            justinazoff/ssh-auth-logger:latest
