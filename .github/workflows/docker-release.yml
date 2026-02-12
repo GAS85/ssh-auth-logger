@@ -46,9 +46,9 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            VERSION=${{ steps.tag.outputs.TAG }}
-            VCS_REF=${{ steps.meta.outputs.SHA }}
-            BUILD_DATE=${{ steps.meta.outputs.DATE }}
+            VERSION=${{ steps.meta.outputs.VERSION }}
+            VCS_REF=${{ steps.meta.outputs.VCS_REF }}
+            BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
           tags: |
 #            justinazoff/ssh-auth-logger:${{ steps.tag.outputs.TAG }}
 #            justinazoff/ssh-auth-logger:latest
