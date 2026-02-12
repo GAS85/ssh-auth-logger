@@ -1,12 +1,18 @@
 FROM golang:latest
 
+ARG VERSION=dev
+ARG VCS_REF=dev
+ARG BUILD_DATE=unknown
+
 LABEL maintainer="Justin Azoff <justin.azoff@gmail.com>" \
       org.opencontainers.image.title="ssh-auth-logger" \
       org.opencontainers.image.description="A low/zero interaction ssh authentication logging honeypot" \
       org.opencontainers.image.source="https://github.com/JustinAzoff/ssh-auth-logger" \
       org.opencontainers.image.url="https://hub.docker.com/r/justinazoff/ssh-auth-logger" \
       org.opencontainers.image.documentation="https://github.com/JustinAzoff/ssh-auth-logger#" \
-      org.opencontainers.image.version="0.1.0"
+      org.opencontainers.image.version=$VERSION \
+      org.opencontainers.image.revision=$VCS_REF \
+      org.opencontainers.image.version=$VERSION
 
 ENV USER=nobody
 ENV SSHD_BIND=:2222
