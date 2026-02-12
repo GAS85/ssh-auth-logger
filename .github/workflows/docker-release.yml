@@ -19,10 +19,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract tag name
-        id: tag
-        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
       - name: Set metadata
         id: meta
         run: |
@@ -52,5 +48,5 @@ jobs:
           tags: |
 #            justinazoff/ssh-auth-logger:${{ steps.tag.outputs.TAG }}
 #            justinazoff/ssh-auth-logger:latest
-            gas85/ssh-auth-logger:${{ steps.tag.outputs.TAG }}
+            gas85/ssh-auth-logger:${{ steps.meta.outputs.VERSION }}
             gas85/ssh-auth-logger:latest
