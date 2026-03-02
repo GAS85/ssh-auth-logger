@@ -25,6 +25,8 @@ var telnetBind string
 
 var telnetLogClearPassword bool
 
+var telnetRate int
+
 var errAuthenticationFailed = errors.New(":)")
 
 var commonFields = logrus.Fields{
@@ -75,7 +77,7 @@ func handleTelnetConnection(conn net.Conn) {
 		WithField("destinationServicename", "telnetd").
 		Info("Connection")
 
-	limitedConn := newRateLimitedConn(conn, rate)
+	limitedConn := newRateLimitedConn(conn, telnetRate)
 
 	// Fake banner
 	limitedConn.Write([]byte("Ubuntu 24.04 LTS\r\n"))
@@ -479,6 +481,11 @@ func init() {
 	if err != nil {
 		logrus.Fatal("Invalid SSHD_RATE environment variable")
 	}
+	telnetRateStr := getEnvWithDefault("TELNET_RATE", "20") // Could be slower than SSH
+	telnetRate, err = strconv.Atoi(telnetRateStr)
+	if err != nil || telnetRate <= 0 {
+		logrus.Fatal("Invalid TELNET_RATE environment variable")
+	}
 	maxAuthTriesStr := getEnvWithDefault("SSHD_MAX_AUTH_TRIES", "6") // default amount of tries is 6-10.
 	maxAuthTries, err = strconv.Atoi(maxAuthTriesStr)
 	if err != nil {
@@ -516,6 +523,7 @@ func init() {
 		"SSHD_LOGS_FILTER":	         logsEnv,
 		"TELNET_BIND":               telnetBind,
 		"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
+		"TELNET_RATE":               telnetRate,
 	}).Info("Starting SSH Auth Logger")
 
 	// Configure allowed log fields from environment variable
