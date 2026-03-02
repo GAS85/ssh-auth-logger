@@ -79,8 +79,35 @@ func handleTelnetConnection(conn net.Conn) {
 
 	limitedConn := newRateLimitedConn(conn, telnetRate)
 
-	// Fake banner
-	limitedConn.Write([]byte("Ubuntu 24.04 LTS\r\n"))
+
+	// Determine profile key (same logic as SSH)
+	var profileKey string
+	if profileScope == "remote_ip" {
+		host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+		if err != nil {
+			host = conn.RemoteAddr().String()
+		}
+		profileKey = host
+	} else {
+		profileKey = getHost(conn.LocalAddr().String())
+	}
+
+	profile := getServerProfile(profileKey)
+
+	// Start from SSH login banner
+	banner := profile.LoginBanner
+
+	// Replace protocol-specific words for Telnet realism
+	banner = strings.ReplaceAll(banner, "SSH", "Telnet")
+	banner = strings.ReplaceAll(banner, "ssh", "telnet")
+
+	// Convert LF to CRLF for telnet
+	banner = strings.ReplaceAll(banner, "\n", "\r\n")
+
+	if banner != "" {
+		limitedConn.Write([]byte(banner))
+	}
+
 	limitedConn.Write([]byte("login: "))
 
 	username, _ := readLine(limitedConn)
@@ -291,6 +318,11 @@ var serverProfiles = []serverProfile{
 	{
 		ServerVersion: "SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.5",
 		LoginBanner:   "Ubuntu 20.04.6 LTS\n\nUnauthorized access prohibited.\n",
+		HostKeyType:   "ed25519",
+	},
+	{
+		ServerVersion: "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.14",
+		LoginBanner:   "Ubuntu 24.04.6 LTS\n\nUnauthorized access prohibited.\n",
 		HostKeyType:   "ed25519",
 	},
 	{
