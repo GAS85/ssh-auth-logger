@@ -10,6 +10,7 @@ LABEL maintainer="Justin Azoff <justin.azoff@gmail.com>" \
 
 ENV USER=nobody
 ENV SSHD_BIND=:2222
+ENV TELNET_BIND=:2323
 
 WORKDIR /app
 
@@ -22,6 +23,6 @@ RUN go install . && \
 
 USER $USER
 
-EXPOSE 2222
+EXPOSE 2222 2323
 
 CMD test -f /var/log/ssh-auth-logger.log || { echo 'Creating log file...' && touch /var/log/ssh-auth-logger.log ; }; /go/bin/ssh-auth-logger 2>&1 | tee -a /var/log/ssh-auth-logger.log
