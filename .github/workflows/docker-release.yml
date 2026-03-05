@@ -34,6 +34,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Prepare image name
+        id: repo
+        run: echo "REPO=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -45,5 +49,5 @@ jobs:
             VCS_REF=${{ steps.meta.outputs.VCS_REF }}
             BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
           tags: |
-            ${{ github.repository }}:${{ steps.meta.outputs.VERSION }}
-            ${{ github.repository }}:latest
+            docker.io/${{ steps.repo.outputs.REPO }}:${{ steps.meta.outputs.VERSION }}
+            docker.io/${{ steps.repo.outputs.REPO }}:latest
