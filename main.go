@@ -147,6 +147,16 @@ func readLine(conn net.Conn) (string, error) {
 			return "", err
 		}
 
+		b := buf[0]
+
+		// TELNET IAC handling (skip command sequences)
+		if b == 255 { // IAC
+			// read next two bytes (command + option)
+			conn.Read(buf)
+			conn.Read(buf)
+			continue
+		}
+
 		// Ignore CR
 		if buf[0] == '\r' {
 			continue
