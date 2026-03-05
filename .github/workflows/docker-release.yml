@@ -45,5 +45,5 @@ jobs:
             VCS_REF=${{ steps.meta.outputs.VCS_REF }}
             BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
           tags: |
-            justinazoff/ssh-auth-logger:${{ steps.meta.outputs.VERSION }}
-            justinazoff/ssh-auth-logger:latest
+            ${{ github.repository }}:${{ steps.meta.outputs.VERSION }}
+            ${{ github.repository }}:latest
