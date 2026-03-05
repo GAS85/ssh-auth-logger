@@ -1,4 +1,12 @@
-FROM golang:latest
+FROM golang:alpine AS builder
+
+WORKDIR /app
+
+COPY . .
+
+RUN go install . 
+
+FROM alpine:latest
 
 ARG VERSION=dev
 ARG VCS_REF=dev
@@ -17,12 +25,9 @@ LABEL maintainer="Justin Azoff <justin.azoff@gmail.com>" \
 ENV USER=nobody
 ENV SSHD_BIND=:2222
 
-WORKDIR /app
+COPY --from=builder /go/bin/ssh-auth-logger /go/bin/ssh-auth-logger
 
-COPY . .
-
-RUN go install . && \
-    touch /var/log/ssh-auth-logger.log && \
+RUN touch /var/log/ssh-auth-logger.log && \
     chown $USER /var/log/ssh-auth-logger.log && \
     chmod 644 /var/log/ssh-auth-logger.log
 
