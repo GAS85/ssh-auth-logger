@@ -75,7 +75,7 @@ func handleTelnetConnection(conn net.Conn) {
 
 	logger.WithFields(connLogParameters(conn)).
 		WithField("destinationServicename", "telnetd").
-		Info("Connection")
+		Info("Telnet connection")
 
 	limitedConn := newRateLimitedConn(conn, telnetRate)
 
