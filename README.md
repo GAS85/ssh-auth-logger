@@ -153,7 +153,7 @@ enabled = true
 filter = ssh-auth-logger
 action = iptables-allports
          # Additonally you can setup abuseipdb reporting as per https://github.com/fail2ban/fail2ban/blob/master/config/action.d/abuseipdb.conf
-         #abuseipdb[custom_message="SSH Honeypot attack.\n", abuseipdb_category="18,22"]
+         #abuseipdb[abuseipdb_category="18,22"]
 # Docker mount log to the localsystem
 logpath = /var/docker/ssh-auth-logger/log/ssh-auth-logger.log
 # maxretry should be equal or more than in a SSHD_MAX_AUTH_TRIES
