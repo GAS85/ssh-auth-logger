@@ -67,6 +67,9 @@ type serverProfile struct {
 	ServerVersion string
 	LoginBanner   string
 	HostKeyType   string // "rsa" or "ed25519"
+    Kex           []string
+    Ciphers       []string
+    Macs          []string
 }
 
 // Telnet handler
@@ -319,31 +322,164 @@ var serverProfiles = []serverProfile{
 		ServerVersion: "SSH-2.0-OpenSSH_7.4",
 		LoginBanner:   "CentOS Linux 7 (Core)\n\nAll connections are monitored.\n",
 		HostKeyType:   "rsa",
+
+		Kex: []string{
+			"curve25519-sha256@libssh.org",
+			"curve25519-sha256",
+			"diffie-hellman-group14-sha256",
+			"diffie-hellman-group14-sha1",
+		},
+
+		Ciphers: []string{
+			"aes128-ctr",
+			"aes192-ctr",
+			"aes256-ctr",
+			"aes128-gcm@openssh.com",
+			"aes256-gcm@openssh.com",
+			"chacha20-poly1305@openssh.com",
+		},
+
+		Macs: []string{
+			"hmac-sha2-256-etm@openssh.com",
+			"hmac-sha2-512-etm@openssh.com",
+			"hmac-sha2-256",
+			"hmac-sha2-512",
+		},
 	},
+
 	{
 		ServerVersion: "SSH-2.0-OpenSSH_7.9p1 Debian-10",
 		LoginBanner:   "Debian GNU/Linux 10\n\nAuthorized users only.\n",
 		HostKeyType:   "rsa",
+
+		Kex: []string{
+			"curve25519-sha256",
+			"curve25519-sha256@libssh.org",
+			"diffie-hellman-group16-sha512",
+			"diffie-hellman-group14-sha256",
+		},
+
+		Ciphers: []string{
+			"chacha20-poly1305@openssh.com",
+			"aes128-gcm@openssh.com",
+			"aes256-gcm@openssh.com",
+			"aes128-ctr",
+			"aes192-ctr",
+			"aes256-ctr",
+		},
+
+		Macs: []string{
+			"hmac-sha2-256-etm@openssh.com",
+			"hmac-sha2-512-etm@openssh.com",
+			"hmac-sha2-256",
+			"hmac-sha2-512",
+		},
 	},
+
 	{
 		ServerVersion: "SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.5",
 		LoginBanner:   "Ubuntu 20.04.6 LTS\n\nUnauthorized access prohibited.\n",
 		HostKeyType:   "ed25519",
+
+		Kex: []string{
+			"curve25519-sha256",
+			"curve25519-sha256@libssh.org",
+			"diffie-hellman-group16-sha512",
+			"diffie-hellman-group14-sha256",
+		},
+
+		Ciphers: []string{
+			"chacha20-poly1305@openssh.com",
+			"aes128-gcm@openssh.com",
+			"aes256-gcm@openssh.com",
+			"aes128-ctr",
+			"aes192-ctr",
+			"aes256-ctr",
+		},
+
+		Macs: []string{
+			"hmac-sha2-256-etm@openssh.com",
+			"hmac-sha2-512-etm@openssh.com",
+			"hmac-sha2-256",
+			"hmac-sha2-512",
+		},
 	},
+
 	{
 		ServerVersion: "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.14",
 		LoginBanner:   "Ubuntu 24.04.1 LTS\n\nUnauthorized access prohibited.\n",
 		HostKeyType:   "ed25519",
+
+		Kex: []string{
+			"curve25519-sha256",
+			"curve25519-sha256@libssh.org",
+			"diffie-hellman-group16-sha512",
+		},
+
+		Ciphers: []string{
+			"chacha20-poly1305@openssh.com",
+			"aes256-gcm@openssh.com",
+			"aes128-gcm@openssh.com",
+			"aes256-ctr",
+			"aes128-ctr",
+		},
+
+		Macs: []string{
+			"hmac-sha2-512-etm@openssh.com",
+			"hmac-sha2-256-etm@openssh.com",
+		},
 	},
+
 	{
 		ServerVersion: "SSH-2.0-OpenSSH_8.4",
 		LoginBanner:   "Debian GNU/Linux 11\n\nAuthorized users only.\n",
 		HostKeyType:   "ed25519",
+
+		Kex: []string{
+			"curve25519-sha256",
+			"curve25519-sha256@libssh.org",
+			"diffie-hellman-group16-sha512",
+			"diffie-hellman-group14-sha256",
+		},
+
+		Ciphers: []string{
+			"chacha20-poly1305@openssh.com",
+			"aes128-gcm@openssh.com",
+			"aes256-gcm@openssh.com",
+			"aes128-ctr",
+			"aes256-ctr",
+		},
+
+		Macs: []string{
+			"hmac-sha2-256-etm@openssh.com",
+			"hmac-sha2-512-etm@openssh.com",
+			"hmac-sha2-256",
+			"hmac-sha2-512",
+		},
 	},
+
 	{
 		ServerVersion: "SSH-2.0-dropbear_2019.78",
 		LoginBanner:   "Welcome to Dropbear SSH Server\n\nUnauthorized access is prohibited.\n",
 		HostKeyType:   "rsa",
+
+		Kex: []string{
+			"curve25519-sha256",
+			"diffie-hellman-group14-sha256",
+			"diffie-hellman-group14-sha1",
+		},
+
+		Ciphers: []string{
+			"aes128-ctr",
+			"aes256-ctr",
+			"aes128-cbc",
+			"3des-cbc",
+		},
+
+		Macs: []string{
+			"hmac-sha2-256",
+			"hmac-sha1",
+		},
 	},
 }
 
@@ -361,6 +497,8 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 //	profile := getServerProfile(host)
 	// per‑IP profile
 //	profile := getServerProfile(conn.RemoteAddr().String())
+
+	var actualHostKeyType string
 	// Determine the key for profile lookup
 	var profileKey string
 	if profileScope == "remote_ip" {
@@ -376,6 +514,8 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	profile := getServerProfile(profileKey)
 	
 	config := ssh.ServerConfig{
+		NoClientAuth: false,
+
 		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 			state.attempts++
 
@@ -417,6 +557,11 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 
 		ServerVersion: profile.ServerVersion,
 		MaxAuthTries:  maxAuthTries + rand.Intn(5),
+		Config: ssh.Config{
+			KeyExchanges: profile.Kex,
+			Ciphers:      profile.Ciphers,
+			MACs:         profile.Macs,
+		},
 	}
 
 	// 🔐 Banner only if enabled
@@ -430,7 +575,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	// Generate host keys with OpenSSH-like ordering
 	var signers []ssh.Signer
 
-	// Primary key
+	// Generate primary host key signer
 	primarySigner, err := getHostKeySigner(profileKey, profile.HostKeyType)
 	if err != nil {
 		logrus.Panic(err)
@@ -460,7 +605,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	}
 
 	// capture primary type for logging
-	actualHostKeyType := primaryType
+	actualHostKeyType = primaryType
 
 	return config
 }
