@@ -388,7 +388,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 			state.attempts++
 
 			base := time.Duration(200*state.attempts) * time.Millisecond
-			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
+			jitter := time.Duration(rand.Intn(700)) * time.Millisecond
 			time.Sleep(base + jitter)
 
 			var loggedPassword any = password
