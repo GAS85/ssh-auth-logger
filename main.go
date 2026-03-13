@@ -374,15 +374,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	}
 
 	profile := getServerProfile(profileKey)
-	// Generate primary host key signer
-	signer, err := getHostKeySigner(profileKey, profile.HostKeyType)
-	if err != nil {
-		logrus.Panic(err)
-	}
-
-	// Capture the actual host key type
-	actualHostKeyType := signer.PublicKey().Type()
-
+	
 	config := ssh.ServerConfig{
 		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 			state.attempts++
