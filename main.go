@@ -435,14 +435,40 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 		}
 	}
 
-	config.AddHostKey(signer)
+	// Generate host keys with OpenSSH-like ordering
+	var signers []ssh.Signer
 
-	// Compatibility: add RSA fallback if primary is ED25519
-	if profile.HostKeyType == "ed25519" {
+	// Primary key
+	primarySigner, err := getHostKeySigner(profileKey, profile.HostKeyType)
+	if err != nil {
+		logrus.Panic(err)
+	}
+
+	primaryType := primarySigner.PublicKey().Type()
+
+	// ED25519 first if available
+	if primaryType == "ssh-ed25519" {
+		signers = append(signers, primarySigner)
+
 		if rsaSigner, err := getHostKeySigner(profileKey, "rsa"); err == nil {
-			config.AddHostKey(rsaSigner)
+			signers = append(signers, rsaSigner)
+		}
+	} else {
+		// RSA primary
+		signers = append(signers, primarySigner)
+
+		if edSigner, err := getHostKeySigner(profileKey, "ed25519"); err == nil {
+			signers = append(signers, edSigner)
 		}
 	}
+
+	// Add keys to config in correct order
+	for _, s := range signers {
+		config.AddHostKey(s)
+	}
+
+	// capture primary type for logging
+	actualHostKeyType := primaryType
 
 	return config
 }
