@@ -118,8 +118,8 @@ func handleTelnetConnection(conn net.Conn) {
 	limitedConn.Write([]byte("Password: "))
 	password, _ := readLine(limitedConn)
 
-	var loggedPassword any = password
 	// This will show the password in cleartext if telnetLogClearPassword is true, otherwise it will log the base64 encoded if telnetLogClearPassword is false
+	var loggedPassword any
 	if telnetLogClearPassword {
 		loggedPassword = string(password)
 	} else {
