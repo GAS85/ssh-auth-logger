@@ -474,6 +474,18 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 }
 
 func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
+
+	// Random early disconnect (~10%)
+	if rand.Intn(10) == 0 {
+		logger.WithFields(connLogParameters(conn)).
+			Info("Connection dropped (simulated network issue)")
+		conn.Close()
+		return
+	}
+
+	// Simulate OpenSSH banner timing
+	time.Sleep(time.Duration(20+rand.Intn(120)) * time.Millisecond)
+
 	_, _, _, err := ssh.NewServerConn(conn, config)
 	if err == nil {
 		// This should never happen because auth never succeeds
