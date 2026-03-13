@@ -332,7 +332,7 @@ var serverProfiles = []serverProfile{
 	},
 	{
 		ServerVersion: "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.14",
-		LoginBanner:   "Ubuntu 24.04.6 LTS\n\nUnauthorized access prohibited.\n",
+		LoginBanner:   "Ubuntu 24.04.1 LTS\n\nUnauthorized access prohibited.\n",
 		HostKeyType:   "ed25519",
 	},
 	{
