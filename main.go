@@ -21,6 +21,8 @@ import (
 
 const appName = "ssh-auth-logger"
 
+var version string
+
 var telnetBind string
 
 var telnetLogClearPassword bool
@@ -688,6 +690,8 @@ func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
+	version = getEnvWithDefault("VERSION", "dev")
+
 	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
 
 	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
@@ -729,6 +733,7 @@ func init() {
 
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
+		"Version":                   version,
 		"SSHD_BIND":                 sshd_bind,
 		"SSHD_KEY_KEY":              sshd_key_key,
 		"SSHD_RATE":                 rate,

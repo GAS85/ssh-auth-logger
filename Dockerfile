@@ -22,6 +22,7 @@ LABEL maintainer="Justin Azoff <justin.azoff@gmail.com>" \
       org.opencontainers.image.revision=$VCS_REF \
       org.opencontainers.image.version=$VERSION
 
+ENV VERSION=$VERSION
 ENV USER=nobody
 ENV SSHD_BIND=:2222
 ENV TELNET_BIND=:2323
