@@ -116,6 +116,22 @@ services:
           max-size: 10m
 ```
 
+## Build local
+
+Fork this project and then execute:
+
+```shell
+go install .
+```
+
+### Test local
+
+To test this project you can run:
+
+```shell
+go test ./... -v
+```
+
 ## fail2ban configuration
 
 To configure [fail2ban](https://github.com/fail2ban/fail2ban) you have to create a filter:

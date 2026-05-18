@@ -6,6 +6,25 @@ on:
       - "v*.*.*" # triggers on tags like v1.0.0
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.1"
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./... -v -timeout 120s
+
   build-and-push:
     runs-on: ubuntu-latest
 
