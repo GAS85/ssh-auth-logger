@@ -5,8 +5,10 @@ on:
     inputs: {}
 
   push:
-    branches:
-      - "*"
+    branches-ignore:
+      - "dev"
+      - "master"
+      - "main"
     # tags-ignore:
     #   - "v*.*.*"
 

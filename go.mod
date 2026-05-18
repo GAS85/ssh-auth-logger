@@ -1,4 +1,4 @@
-module github.com/JustinAzoff/ssh-auth-logger
+module github.com/GAS85/ssh-auth-logger
 
 go 1.25.0
 
