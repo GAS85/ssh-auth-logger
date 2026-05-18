@@ -11,6 +11,7 @@ jobs:
 
   build-and-push:
     runs-on: ubuntu-latest
+    needs: test
 
     permissions:
       contents: read
@@ -63,6 +64,7 @@ jobs:
       actions: read # only required for a private repository by github/codeql-action/upload-sarif to get the Action run status
     name: Scan latest image after build
     runs-on: ubuntu-latest
+    needs: build-and-push
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -74,7 +76,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: "docker.io/${{ steps.meta.outputs.LABEL_IMAGE_URL }}:${{ steps.meta.outputs.VERSION }}"
+          image-ref: "docker.io/${{ steps.repo.outputs.REPO }}:latest"
           format: "template"
           template: "@/contrib/sarif.tpl"
           output: "trivy-results.sarif"
