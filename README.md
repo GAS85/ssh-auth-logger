@@ -2,6 +2,18 @@
 
 A low/zero interaction ssh authentication logging honeypot
 
+[![Dev Build](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml/badge.svg?branch=dev)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml)
+[![Test Automation](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml/badge.svg)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml)
+[![Release Build and Push to Dockerhub](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-release.yml/badge.svg)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-release.yml)
+[![Docker hub](https://img.shields.io/badge/Docker--hub-grey?logo=docker)][docker-hub]
+[![Docker Pulls][docker-pulls]][docker-hub]
+[![Docker Image Size][docker-size]][docker-hub]
+[![Docker Image Size][docker-size]][docker-hub]
+
+[docker-hub]: https://hub.docker.com/r/gas85/ssh-auth-logger
+[docker-pulls]: https://img.shields.io/docker/pulls/gas85/ssh-auth-logger?logo=docker
+[docker-size]: https://img.shields.io/docker/image-size/gas85/ssh-auth-logger/latest?logo=docker
+
 ## Interesting features
 
 ### Structured logging
@@ -38,7 +50,7 @@ This is normally logged on one line
 ## How to use it
 
 ```shell
-go install github.com/JustinAzoff/ssh-auth-logger@latest
+go install github.com/GAS85/ssh-auth-logger@latest
 export SSHD_BIND=:2222
 ~/go/bin/ssh-auth-logger
 ```
@@ -56,7 +68,7 @@ sudo setcap cap_net_bind_service=+ep ~/go/bin/ssh-auth-logger
 Bind to port 2222 in a host machine
 
 ```shell
-docker run -t -i --rm  -p 2222:2222 justinazoff/ssh-auth-logger
+docker run -t -i --rm  -p 2222:2222 gas85/ssh-auth-logger@latest
 ```
 
 Docker compose example:
