@@ -2,8 +2,8 @@ name: Build and Push Docker Image on Tag
 
 on:
   push:
-    tags:
-      - "v*.*.*" # triggers on tags like v1.0.0
+    branches:
+      - "dev"
 
 jobs:
   test:
@@ -23,7 +23,6 @@ jobs:
       - name: Set metadata
         id: meta
         run: |
-          echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           echo "VCS_REF=${GITHUB_SHA}" >> $GITHUB_OUTPUT
           echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
           echo "LABEL_MAINTAINER=${{ github.repository_owner }}" >> $GITHUB_OUTPUT
@@ -46,7 +45,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            VERSION=${{ steps.meta.outputs.VERSION }}
+            VERSION=dev
             VCS_REF=${{ steps.meta.outputs.VCS_REF }}
             BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
             LABEL_MAINTAINER=${{ steps.meta.outputs.LABEL_MAINTAINER }}
@@ -54,7 +53,6 @@ jobs:
             LABEL_IMAGE_URL=${{ steps.meta.outputs.LABEL_IMAGE_URL }}
           tags: |
             docker.io/${{ steps.meta.outputs.LABEL_IMAGE_URL }}:${{ steps.meta.outputs.VERSION }}
-            docker.io/${{ steps.meta.outputs.LABEL_IMAGE_URL }}:latest
 
   security-scan-release:
     permissions:

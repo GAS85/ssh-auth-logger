@@ -1,11 +1,14 @@
-name: Test image
+name: Test Automation
 
 on:
+  workflow_call:  # Allow this workflow to be called by other workflows
+    inputs: {}
+
   push:
-#    branches-ignore:
-#      - master
-    tags-ignore:
-      - "v*.*.*"
+    branches:
+      - "*"
+    # tags-ignore:
+    #   - "v*.*.*"
 
 jobs:
   test:
