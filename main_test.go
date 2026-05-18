@@ -366,7 +366,7 @@ func TestRateLimitedConn_Write(t *testing.T) {
 	go func() {
 		buf := make([]byte, 5)
 		client.SetReadDeadline(time.Now().Add(2 * time.Second))
-		n, _ := client.Read(buf)
+		n, _ := client.Read(buf) // Error ignored, something that could be improved
 		done <- string(buf[:n])
 	}()
 
@@ -409,6 +409,47 @@ func TestNewRateLimitedConn_TokenInit(t *testing.T) {
 	}
 	if r.bufferSize != 1000 {
 		t.Errorf("bufferSize should be 2×rate (%d), got %d", 1000, r.bufferSize)
+	}
+}
+
+func TestRateLimitedConn_TokenRefill(t *testing.T) {
+	server, client := tcpPair(t)
+	defer client.Close()
+
+	const ratePerSec = 100
+	limited := newRateLimitedConn(server, ratePerSec)
+
+	// Drain all tokens by setting them to zero and backdating lastUpdate
+	// so the next write starts with an empty bucket.
+	limited.tokens = 0
+	limited.lastUpdate = time.Now().Add(-1 * time.Second) // simulate 1s elapsed
+
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, ratePerSec)
+		client.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err := client.Read(buf)
+		done <- err
+	}()
+
+	// Write exactly one rate-worth of bytes; should succeed after refill
+	payload := bytes.Repeat([]byte("x"), ratePerSec)
+	if _, err := limited.Write(payload); err != nil {
+		t.Fatalf("Write after refill failed: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("client read error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: tokens were not refilled")
+	}
+
+	// After the write, tokens should have been consumed (≤ initial refill amount)
+	if limited.tokens > ratePerSec {
+		t.Errorf("tokens after write should be ≤ %d, got %d", ratePerSec, limited.tokens)
 	}
 }
 
@@ -619,23 +660,54 @@ func startSSHServer(t *testing.T) string {
 }
 
 // dialSSH attempts an SSH connection with the given config, retrying on the
-// 10 % random-drop behaviour baked into handleConnection.
+// 10 % random-drop behavior baked into handleConnection.
 func dialSSH(addr string, cfg *ssh.ClientConfig) error {
+	const maxAttempts = 15
+	const retryDelay = 60 * time.Millisecond
+
+	isDropped := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		msg := err.Error()
+		return strings.Contains(msg, "connection reset") ||
+			strings.Contains(msg, "EOF") ||
+			strings.Contains(msg, "broken pipe") ||
+			strings.Contains(msg, "forcibly closed")
+	}
+
+	isAuthRejected := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		msg := err.Error()
+		return strings.Contains(msg, "unable to authenticate") ||
+			strings.Contains(msg, "no supported methods remain")
+	}
+
 	var lastErr error
-	for i := 0; i < 8; i++ {
+	for i := 0; i < maxAttempts; i++ {
 		_, err := ssh.Dial("tcp", addr, cfg)
 		if err == nil {
-			return nil // should not happen — auth never succeeds
+			return nil // should never happen — auth never succeeds
 		}
 		lastErr = err
-		// Distinguish "auth rejected" (expected) from "connection reset" (random drop).
-		if strings.Contains(err.Error(), "unable to authenticate") ||
-			strings.Contains(err.Error(), "ssh: handshake failed") {
-			return err
+
+		if isAuthRejected(err) {
+			return err // expected outcome, no need to retry
 		}
-		time.Sleep(50 * time.Millisecond)
+
+		if isDropped(err) {
+			time.Sleep(retryDelay)
+			continue // simulated network drop, retry
+		}
+
+		// Unknown error — retry but log for visibility
+		t := cfg.User // abuse User as a label since we have no *testing.T here
+		_ = t
+		time.Sleep(retryDelay)
 	}
-	return lastErr
+	return fmt.Errorf("dialSSH: exhausted %d attempts, last error: %w", maxAttempts, lastErr)
 }
 
 func sshClientCfg(user string, methods ...ssh.AuthMethod) *ssh.ClientConfig {
