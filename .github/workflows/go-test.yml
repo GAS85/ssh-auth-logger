@@ -1,16 +1,14 @@
 name: Test Automation
 
 on:
-  workflow_call:  # Allow this workflow to be called by other workflows
+  workflow_call: # Allow this workflow to be called by other workflows
     inputs: {}
 
   push:
     branches-ignore:
       - "dev"
-      - "master"
-      - "main"
-    # tags-ignore:
-    #   - "v*.*.*"
+    tags-ignore:
+      - "v*.*.*"
 
 jobs:
   test:
@@ -18,10 +16,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        # https://github.com/actions/checkout/releases/tag/v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        # https://github.com/actions/setup-go/releases/tag/v6.4.0
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
           go-version: "1.26.1"
           cache: true
@@ -29,5 +29,18 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Run tests
-        run: go test ./... -v -timeout 120s
+      - name: Run tests with coverage
+        run: |
+          go test ./... \
+            -covermode=atomic \
+            -coverpkg=./... \
+            -coverprofile=coverage.txt \
+            -v \
+            -timeout 120s
+
+      - name: Upload coverage to Codecov
+        # https://github.com/codecov/codecov-action/releases/tag/v6.0.1
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354
+        with:
+          files: coverage.txt
+          token: ${{ secrets.CODECOV_TOKEN }}
