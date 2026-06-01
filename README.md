@@ -5,6 +5,7 @@ A low/zero interaction ssh authentication logging honeypot
 [![Dev Build](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml/badge.svg?branch=dev)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml)
 [![Test Automation](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml/badge.svg)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml)
 [![Release Build and Push to Dockerhub](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-release.yml/badge.svg)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-release.yml)
+[![codecov](https://codecov.io/gh/GAS85/ssh-auth-logger/branch/main/graph/badge.svg)](https://codecov.io/gh/GAS85/ssh-auth-logger)
 [![Docker hub](https://img.shields.io/badge/Docker--hub-grey?logo=docker)][docker-hub]
 [![Docker Pulls][docker-pulls]][docker-hub]
 [![Docker Image Size][docker-size]][docker-hub]
