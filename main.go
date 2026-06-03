@@ -486,6 +486,16 @@ var serverProfiles = []serverProfile{
 }
 
 func getServerProfile(host string) serverProfile {
+	// Allow forcing a specific profile for testing
+	if forceProfile := os.Getenv("FORCE_SSH_PROFILE"); forceProfile != "" {
+		for i, profile := range serverProfiles {
+			if strings.Contains(profile.ServerVersion, forceProfile) {
+				logrus.WithField("forced_profile", profile.ServerVersion).Warn("FORCE_SSH_PROFILE active")
+				return serverProfiles[i]
+			}
+		}
+	}
+	
 	seed := HashToInt64([]byte("profile:"+host), []byte(sshd_key_key))
 	if seed < 0 {
 		seed = -seed
