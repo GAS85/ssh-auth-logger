@@ -3,6 +3,9 @@ name: Test Automation
 on:
   workflow_call: # Allow this workflow to be called by other workflows
     inputs: {}
+    secrets:
+      CODECOV_TOKEN:
+        required: true
 
   push:
     branches-ignore:

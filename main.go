@@ -69,9 +69,9 @@ type serverProfile struct {
 	ServerVersion string
 	LoginBanner   string
 	HostKeyType   string // "rsa" or "ed25519"
-    Kex           []string
-    Ciphers       []string
-    Macs          []string
+	Kex           []string
+	Ciphers       []string
+	Macs          []string
 }
 
 // Telnet handler
@@ -486,6 +486,16 @@ var serverProfiles = []serverProfile{
 }
 
 func getServerProfile(host string) serverProfile {
+	// Allow forcing a specific profile for testing
+	if forceProfile := os.Getenv("FORCE_SSH_PROFILE"); forceProfile != "" {
+		for i, profile := range serverProfiles {
+			if strings.Contains(profile.ServerVersion, forceProfile) {
+				logrus.WithField("forced_profile", profile.ServerVersion).Warn("FORCE_SSH_PROFILE active")
+				return serverProfiles[i]
+			}
+		}
+	}
+	
 	seed := HashToInt64([]byte("profile:"+host), []byte(sshd_key_key))
 	if seed < 0 {
 		seed = -seed
@@ -665,26 +675,37 @@ type FilteredJSONFormatter struct {
 
 // Format filters the log entry to include only allowed fields
 func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	// Avoid null pointer if Base is not set
-	base := f.Base
-	if base == nil {
-		base = &logrus.JSONFormatter{}
+	// Ensure Base is not nil
+	var baseFormatter *logrus.JSONFormatter
+	if f.Base == nil {
+		// Create a default JSON formatter with sensible defaults
+		baseFormatter = &logrus.JSONFormatter{
+			TimestampFormat: time.RFC3339Nano,
+			DisableTimestamp: false,
+			PrettyPrint:     false,
+		}
+	} else {
+		baseFormatter = f.Base
 	}
-
+	
+	// Filter the fields
 	filtered := logrus.Fields{}
-
-	// Filter ONLY structured fields
 	for k, v := range entry.Data {
+		if len(f.Allowed) == 0 {
+			// If Allowed is empty, don't include any custom fields
+			continue
+		}
 		if f.Allowed[k] {
 			filtered[k] = v
 		}
 	}
-
-	// Clone entry safely
+	
+	// Create a new entry with filtered data
 	newEntry := *entry
 	newEntry.Data = filtered
-
-	return f.Base.Format(&newEntry)
+	
+	// Format using the base formatter
+	return baseFormatter.Format(&newEntry)
 }
 
 func init() {

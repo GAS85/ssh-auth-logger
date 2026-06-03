@@ -51,7 +51,7 @@ This is normally logged on one line
 ## How to use it
 
 ```shell
-go install github.com/GAS85/ssh-auth-logger@latest
+go install github.com/GAS85/ssh-auth-logger:latest
 export SSHD_BIND=:2222
 ~/go/bin/ssh-auth-logger
 ```
@@ -69,7 +69,7 @@ sudo setcap cap_net_bind_service=+ep ~/go/bin/ssh-auth-logger
 Bind to port 2222 in a host machine
 
 ```shell
-docker run -t -i --rm  -p 2222:2222 gas85/ssh-auth-logger@latest
+docker run -t -i --rm  -p 2222:2222 gas85/ssh-auth-logger:latest
 ```
 
 Docker compose example:
@@ -97,6 +97,7 @@ services:
 #      - SSHD_SEND_BANNER=false                # Send SSH Login Banner before Password prompt
 #      - SSHD_LOG_CLEAR_PASSWORD=true          # Log Passwords as clear text or Base64 coded
 #      - SSHD_LOGS_FILTER=""                   # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product"
+#      - FORCE_SSH_PROFILE=dropbear            # Force profile to use, please refer to "serverProfiles" in main.go. Possible values: dropbear, OpenSSH_7.4, OpenSSH_7.9, OpenSSH_8.2, OpenSSH_8.4, OpenSSH_9.6
       # Telnet Part
 #      - TELNET_BIND=:2323                     # Port and interface telnetd to listen
 #      - TELNET_LOG_CLEAR_PASSWORD=true        # Log Passwords as clear text or Base64 coded
