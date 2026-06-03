@@ -29,6 +29,8 @@ ENV VERSION=$VERSION
 ENV USER=nobody
 ENV SSHD_BIND=:2222
 ENV TELNET_BIND=:2323
+# This is needed to enable aes128-cbc and 3des old insecure ciphers support
+ENV GODEBUG="sshserverinsecurecbc=1"
 
 COPY --from=builder /go/bin/ssh-auth-logger /go/bin/ssh-auth-logger
 
