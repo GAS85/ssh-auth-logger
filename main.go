@@ -25,6 +25,8 @@ import (
 )
 
 const appName = "ssh-auth-logger"
+// const abuseIPDBCleanupInterval = 30 * time.Minute
+// const abuseIPDBStateExpiry = 2 * time.Hour
 
 var (
 	version       string
@@ -55,6 +57,8 @@ var (
 	abuseIPDBAttempts       int
 	abuseIPDBReportInterval time.Duration
 	abuseIPDBCategories     string
+	abuseIPDBCleanupInterval time.Duration
+	abuseIPDBStateExpiry     time.Duration
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -85,6 +89,7 @@ type serverProfile struct {
 type abuseIPState struct {
 	attempts      int
 	lastReported  time.Time
+	lastSeen      time.Time
 }
 
 // abuseIPDBReporter tracks authentication failures per source IP and reports abusive IPs to AbuseIPDB once the configured threshold has been reached.
@@ -112,7 +117,7 @@ func newAbuseIPDBReporter(
 	categories string,
 ) *abuseIPDBReporter {
 
-	return &abuseIPDBReporter{
+	r := &abuseIPDBReporter{
 		enabled:       enabled,
 		apiKey:        apiKey,
 		attemptsLimit: attemptsLimit,
@@ -125,6 +130,12 @@ func newAbuseIPDBReporter(
 
 		ips: make(map[string]*abuseIPState),
 	}
+
+	if enabled {
+		go r.cleanupLoop()
+	}
+
+	return r
 }
 
 // RecordFailure records a failed authentication attempt.
@@ -143,6 +154,7 @@ func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username string) bool {
 	now := time.Now()
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	state, exists := r.ips[ip]
 	if !exists {
@@ -150,35 +162,37 @@ func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username string) bool {
 		r.ips[ip] = state
 	}
 
+	state.lastSeen = now
+
 	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
 	if !state.lastReported.IsZero() &&
 		now.Sub(state.lastReported) < r.reportEvery {
 
-		r.mu.Unlock()
+		// r.mu.Unlock()
 		return false
 	}
 
 	state.attempts++
 
 	if state.attempts < r.attemptsLimit {
-		r.mu.Unlock()
+		// r.mu.Unlock()
 		return false
 	}
 
 	// Mark the IP as reported BEFORE starting the goroutine.
-	// This is important: if several authentication attempts arrive concurrently, only one of them should schedule a report.
+	// If several authentication attempts arrive concurrently, only one of them should schedule a report.
 	state.lastReported = now
 	state.attempts = 0
 
-	r.mu.Unlock()
+	// r.mu.Unlock()
 
 	logger.WithFields(logrus.Fields{
 		"ip":         ip,
 		"protocol":   protocol,
-		"username":   username,
+		// "username":   username,
 		"attempts":   r.attemptsLimit,
-		"cooldown":   r.reportEvery.String(),
-	}).Info("AbuseIPDB report threshold reached")
+		// "cooldown":   r.reportEvery.String(),
+	}).Info("AbuseIPDB: report threshold reached. Report IP.")
 
 	go r.report(ip, protocol, username)
 
@@ -241,6 +255,40 @@ func (r *abuseIPDBReporter) report(ip, protocol, username string) {
 		"protocol": protocol,
 		"username": username,
 	}).Info("AbuseIPDB: IP reported")
+}
+
+// AbuseIPDB cleanup the state
+func (r *abuseIPDBReporter) cleanupLoop() {
+	ticker := time.NewTicker(abuseIPDBCleanupInterval)
+
+	defer ticker.Stop()
+
+	for range ticker.C {
+		r.cleanup()
+	}
+}
+
+func (r *abuseIPDBReporter) cleanup() {
+	now := time.Now()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	removed := 0
+
+	for ip, state := range r.ips {
+		if now.Sub(state.lastSeen) > abuseIPDBStateExpiry {
+			delete(r.ips, ip)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		logger.WithFields(logrus.Fields{
+			"removed": removed,
+			"remaining": len(r.ips),
+		}).Debug("AbuseIPDB state cleanup completed")
+	}
 }
 
 // Telnet handler
@@ -971,6 +1019,19 @@ func init() {
 	}
 
 	abuseIPDBCategories = getEnvWithDefault("ABUSEIPDB_CATEGORIES", "18,22")
+
+	abuseIPDBCleanupIntervalStr := getEnvWithDefault("ABUSEIPDB_CLEANUP_INTERVAL", "30m")
+	abuseIPDBCleanupInterval, err = time.ParseDuration(abuseIPDBCleanupIntervalStr)
+	if err != nil || abuseIPDBCleanupInterval <= 0 {
+		logrus.Fatal("Invalid ABUSEIPDB_CLEANUP_INTERVAL environment variable")
+	}
+
+	abuseIPDBStateExpiryStr := getEnvWithDefault("ABUSEIPDB_STATE_EXPIRY", "2h")
+	abuseIPDBStateExpiry, err =	time.ParseDuration(abuseIPDBStateExpiryStr)
+	if err != nil || abuseIPDBStateExpiry <= 0 {
+		logrus.Fatal("Invalid ABUSEIPDB_STATE_EXPIRY environment variable")
+	}
+
 	if abuseIPDBEnabled && abuseIPDBAPIKey == "" {
 		logrus.Fatal(
 			"ABUSEIPDB_ENABLED is enabled but ABUSEIPDB_API_KEY is empty",
@@ -986,7 +1047,7 @@ func init() {
 	)
 
 	// Show Configuration on Startup
-	logrus.WithFields(logrus.Fields{
+	startupFields := logrus.Fields{
 		"Version":                   version,
 		"SSHD_BIND":                 sshd_bind,
 		"SSHD_KEY_KEY":              sshd_key_key,
@@ -1000,11 +1061,17 @@ func init() {
 		"TELNET_BIND":               telnetBind,
 		"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
 		"TELNET_RATE":               telnetRate,
-		"ABUSEIPDB_ENABLED":         abuseIPDBEnabled,
-		"ABUSEIPDB_ATTEMPTS":        abuseIPDBAttempts,
-		"ABUSEIPDB_REPORT_INTERVAL": abuseIPDBReportInterval.String(),
-		"ABUSEIPDB_CATEGORIES":      abuseIPDBCategories,
-	}).Info("Starting SSH Auth Logger")
+	}
+	// Only show AbuseIPDB configuration when enabled.
+	if abuseIPDBEnabled {
+		startupFields["ABUSEIPDB_ENABLED"] = true
+		startupFields["ABUSEIPDB_ATTEMPTS"] = abuseIPDBAttempts
+		startupFields["ABUSEIPDB_REPORT_INTERVAL"] = abuseIPDBReportInterval.String()
+		startupFields["ABUSEIPDB_CATEGORIES"] = abuseIPDBCategories
+		startupFields["ABUSEIPDB_CLEANUP_INTERVAL"] = abuseIPDBCleanupInterval.String()
+		startupFields["ABUSEIPDB_STATE_EXPIRY"] = abuseIPDBStateExpiry.String()
+	}
+	logrus.WithFields(startupFields).Info("Starting SSH Auth Logger")
 
 	// Configure allowed log fields from environment variable
 	if logsEnv != "" {
