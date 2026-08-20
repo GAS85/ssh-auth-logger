@@ -1066,7 +1066,7 @@ func init() {
 
 	abuseIPDBAPIKey = os.Getenv("ABUSEIPDB_API_KEY")
 
-	abuseIPDBAttemptsStr := getEnvWithDefault("ABUSEIPDB_ATTEMPTS", "2")
+	abuseIPDBAttemptsStr := getEnvWithDefault("ABUSEIPDB_ATTEMPTS", "10")
 	abuseIPDBAttempts, err = strconv.Atoi(abuseIPDBAttemptsStr)
 	if err != nil || abuseIPDBAttempts <= 0 {
 		logrus.Fatal("Invalid ABUSEIPDB_ATTEMPTS environment variable")
