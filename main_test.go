@@ -185,6 +185,48 @@ func TestGetServerProfile_SpreadAcrossProfiles(t *testing.T) {
 	}
 }
 
+// ── malformed profiles ────────────────────────────────────────────────────────
+
+func TestServerProfiles_AllValid(t *testing.T) {
+	if len(serverProfiles) == 0 {
+		t.Fatal("serverProfiles must not be empty")
+	}
+
+	for i, p := range serverProfiles {
+		t.Run(fmt.Sprintf("profile-%d-%s", i, p.ServerVersion), func(t *testing.T) {
+			if p.ServerVersion == "" {
+				t.Error("ServerVersion must not be empty")
+			}
+
+			if !strings.HasPrefix(p.ServerVersion, "SSH-2.0-") {
+				t.Errorf("invalid SSH server version: %q", p.ServerVersion)
+			}
+
+			if p.LoginBanner == "" {
+				t.Error("LoginBanner must not be empty")
+			}
+
+			switch p.HostKeyType {
+			case "rsa", "ed25519":
+			default:
+				t.Errorf("invalid HostKeyType: %q", p.HostKeyType)
+			}
+
+			if len(p.Kex) == 0 {
+				t.Error("Kex must not be empty")
+			}
+
+			if len(p.Ciphers) == 0 {
+				t.Error("Ciphers must not be empty")
+			}
+
+			if len(p.Macs) == 0 {
+				t.Error("Macs must not be empty")
+			}
+		})
+	}
+}
+
 // ── getHostKeySigner ──────────────────────────────────────────────────────────
 
 func TestGetHostKeySigner_Ed25519(t *testing.T) {
