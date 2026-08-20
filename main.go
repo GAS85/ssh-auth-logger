@@ -14,6 +14,11 @@ import (
 	"time"
 	"strings"
 	"encoding/base64"
+	"bytes"
+	"fmt"
+	"net/http"
+	"net/url"
+	"sync"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -44,6 +49,12 @@ var (
 		"destinationServicename": "sshd",
 		"product":                appName,
 	}
+
+	abuseIPDBEnabled        bool
+	abuseIPDBAPIKey         string
+	abuseIPDBAttempts       int
+	abuseIPDBReportInterval time.Duration
+	abuseIPDBCategories     string
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -55,8 +66,7 @@ type rateLimitedConn struct {
 	lastUpdate time.Time
 }
 
-// Currently state is not shared between connections
-// multiple attackers can "reset” delays by opening new connections
+// Currently state is not shared between connections multiple attackers can "reset” delays by opening new connections
 type authState struct {
 	attempts int
 }
@@ -69,6 +79,168 @@ type serverProfile struct {
 	Kex           []string
 	Ciphers       []string
 	Macs          []string
+}
+
+// abuseIPState contains reporting state for one source IP.
+type abuseIPState struct {
+	attempts      int
+	lastReported  time.Time
+}
+
+// abuseIPDBReporter tracks authentication failures per source IP and reports abusive IPs to AbuseIPDB once the configured threshold has been reached.
+type abuseIPDBReporter struct {
+	mu sync.Mutex
+
+	apiKey        string
+	enabled       bool
+	attemptsLimit int
+	reportEvery   time.Duration
+	categories    string
+
+	httpClient *http.Client
+
+	ips map[string]*abuseIPState
+}
+
+var abuseReporter *abuseIPDBReporter
+
+func newAbuseIPDBReporter(
+	enabled bool,
+	apiKey string,
+	attemptsLimit int,
+	reportEvery time.Duration,
+	categories string,
+) *abuseIPDBReporter {
+
+	return &abuseIPDBReporter{
+		enabled:       enabled,
+		apiKey:        apiKey,
+		attemptsLimit: attemptsLimit,
+		reportEvery:   reportEvery,
+		categories:    categories,
+
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+
+		ips: make(map[string]*abuseIPState),
+	}
+}
+
+// RecordFailure records a failed authentication attempt.
+// Once the configured number of attempts has been reached, the IP is reported asynchronously to AbuseIPDB.
+// Returns true if this call caused a report to be scheduled.
+func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username string) bool {
+	if !r.enabled {
+		return false
+	}
+
+	if net.ParseIP(ip) == nil {
+		logger.WithField("ip", ip).Warn("AbuseIPDB: invalid IP address")
+		return false
+	}
+
+	now := time.Now()
+
+	r.mu.Lock()
+
+	state, exists := r.ips[ip]
+	if !exists {
+		state = &abuseIPState{}
+		r.ips[ip] = state
+	}
+
+	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
+	if !state.lastReported.IsZero() &&
+		now.Sub(state.lastReported) < r.reportEvery {
+
+		r.mu.Unlock()
+		return false
+	}
+
+	state.attempts++
+
+	if state.attempts < r.attemptsLimit {
+		r.mu.Unlock()
+		return false
+	}
+
+	// Mark the IP as reported BEFORE starting the goroutine.
+	// This is important: if several authentication attempts arrive concurrently, only one of them should schedule a report.
+	state.lastReported = now
+	state.attempts = 0
+
+	r.mu.Unlock()
+
+	logger.WithFields(logrus.Fields{
+		"ip":         ip,
+		"protocol":   protocol,
+		"username":   username,
+		"attempts":   r.attemptsLimit,
+		"cooldown":   r.reportEvery.String(),
+	}).Info("AbuseIPDB report threshold reached")
+
+	go r.report(ip, protocol, username)
+
+	return true
+}
+
+// report sends the actual AbuseIPDB request.
+// This is deliberately asynchronous so an external API problem cannot delay or interfere with SSH/Telnet authentication handling.
+func (r *abuseIPDBReporter) report(ip, protocol, username string) {
+	comment := fmt.Sprintf(
+		"%s authentication brute-force attempt against SSH/Telnet honeypot; username=%q",
+		protocol,
+		username,
+	)
+
+	form := url.Values{}
+	form.Set("ip", ip)
+	form.Set("categories", r.categories)
+	form.Set("comment", comment)
+	form.Set("timestamp", time.Now().UTC().Format(time.RFC3339))
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		"https://api.abuseipdb.com/api/v2/report",
+		bytes.NewBufferString(form.Encode()),
+	)
+	if err != nil {
+		logger.WithError(err).
+			WithField("ip", ip).
+			Error("AbuseIPDB: failed to create request")
+		return
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Key", r.apiKey)
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		logger.WithError(err).
+			WithField("ip", ip).
+			Error("AbuseIPDB: request failed")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		logger.WithFields(logrus.Fields{
+			"ip":         ip,
+			"status":     resp.Status,
+			"protocol":   protocol,
+			"username":   username,
+		}).Warn("AbuseIPDB: report rejected")
+
+		return
+	}
+
+	logger.WithFields(logrus.Fields{
+		"ip":       ip,
+		"protocol": protocol,
+		"username": username,
+	}).Info("AbuseIPDB: IP reported")
 }
 
 // Telnet handler
@@ -133,6 +305,16 @@ func handleTelnetConnection(conn net.Conn) {
 	logger.WithFields(fields).
 		WithField("destinationServicename", "telnetd").
 		Info("Telnet login attempt")
+
+	// AbuseIPDB reporting
+	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err == nil {
+		abuseReporter.RecordFailure(
+			ip,
+			"Telnet",
+			string(username),
+		)
+	}
 
 	time.Sleep(2 * time.Second)
 	limitedConn.Write([]byte("\r\nLogin incorrect\r\n"))
@@ -544,6 +726,16 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 					"server_key_type": actualHostKeyType,
 				}).Info("Request with password")
 
+			// AbuseIPDB reporting
+			ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+			if err == nil {
+				abuseReporter.RecordFailure(
+					ip,
+					"SSH",
+					conn.User(),
+				)
+			}
+
 			return nil, errAuthenticationFailed
 		},
 
@@ -560,6 +752,17 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 					"fingerprint": ssh.FingerprintSHA256(key),
 					"server_key_type": actualHostKeyType,
 				}).Info("Request with key")
+
+			// AbuseIPDB reporting.
+			// Password attempts and public-key attempts both count toward the same IP threshold
+			ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+			if err == nil {
+				abuseReporter.RecordFailure(
+					ip,
+					"SSH",
+					conn.User(),
+				)
+			}
 
 			return nil, errAuthenticationFailed
 		},
@@ -749,6 +952,39 @@ func init() {
 	// Comma-separated list of allowed fields, "" means all, " " means none
 	logsEnv := getEnvWithDefault("SSHD_LOGS_FILTER", "")
 
+	// AbuseIPDB configuration
+	abuseIPDBEnabledStr := getEnvWithDefault("ABUSEIPDB_ENABLED", "false")
+	abuseIPDBEnabled = abuseIPDBEnabledStr == "1" || abuseIPDBEnabledStr == "true" || abuseIPDBEnabledStr == "yes"
+
+	abuseIPDBAPIKey = os.Getenv("ABUSEIPDB_API_KEY")
+
+	abuseIPDBAttemptsStr := getEnvWithDefault("ABUSEIPDB_ATTEMPTS", "10")
+	abuseIPDBAttempts, err = strconv.Atoi(abuseIPDBAttemptsStr)
+	if err != nil || abuseIPDBAttempts <= 0 {
+		logrus.Fatal("Invalid ABUSEIPDB_ATTEMPTS environment variable")
+	}
+
+	abuseIPDBReportIntervalStr := getEnvWithDefault("ABUSEIPDB_REPORT_INTERVAL", "15m") // https://www.abuseipdb.com/api.html
+	abuseIPDBReportInterval, err = time.ParseDuration(abuseIPDBReportIntervalStr)
+	if err != nil || abuseIPDBReportInterval <= 0 {
+		logrus.Fatal("Invalid ABUSEIPDB_REPORT_INTERVAL environment variable")
+	}
+
+	abuseIPDBCategories = getEnvWithDefault("ABUSEIPDB_CATEGORIES", "18,22")
+	if abuseIPDBEnabled && abuseIPDBAPIKey == "" {
+		logrus.Fatal(
+			"ABUSEIPDB_ENABLED is enabled but ABUSEIPDB_API_KEY is empty",
+		)
+	}
+
+	abuseReporter = newAbuseIPDBReporter(
+		abuseIPDBEnabled,
+		abuseIPDBAPIKey,
+		abuseIPDBAttempts,
+		abuseIPDBReportInterval,
+		abuseIPDBCategories,
+	)
+
 	// Show Configuration on Startup
 	logrus.WithFields(logrus.Fields{
 		"Version":                   version,
@@ -764,6 +1000,10 @@ func init() {
 		"TELNET_BIND":               telnetBind,
 		"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
 		"TELNET_RATE":               telnetRate,
+		"ABUSEIPDB_ENABLED":         abuseIPDBEnabled,
+		"ABUSEIPDB_ATTEMPTS":        abuseIPDBAttempts,
+		"ABUSEIPDB_REPORT_INTERVAL": abuseIPDBReportInterval.String(),
+		"ABUSEIPDB_CATEGORIES":      abuseIPDBCategories,
 	}).Info("Starting SSH Auth Logger")
 
 	// Configure allowed log fields from environment variable
