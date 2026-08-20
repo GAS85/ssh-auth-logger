@@ -21,24 +21,13 @@ import (
 
 const appName = "ssh-auth-logger"
 
-var version string
-
-var telnetBind string
-
-var telnetLogClearPassword bool
-
-var telnetRate int
-
-var errAuthenticationFailed = errors.New(":)")
-
-var commonFields = logrus.Fields{
-	"destinationServicename": "sshd",
-	"product":                appName,
-}
-var logger = logrus.WithFields(commonFields)
-var allowedLogFields map[string]bool
-
 var (
+	version       string
+
+	telnetBind    string
+	telnetLogClearPassword bool
+	telnetRate   int
+
 	sshd_bind    string
 	sshd_key_key string
 	rate         int
@@ -47,6 +36,14 @@ var (
 	profileScope string // "host" or "remote_ip"
 	sendBanner   bool
 	logClearPassword bool
+
+	logger = logrus.WithFields(commonFields)
+	allowedLogFields map[string]bool
+	errAuthenticationFailed = errors.New(":)")
+	commonFields = logrus.Fields{
+		"destinationServicename": "sshd",
+		"product":                appName,
+	}
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
