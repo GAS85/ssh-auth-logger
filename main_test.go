@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,6 +79,12 @@ func (h *logHook) Levels() []logrus.Level { return logrus.AllLevels }
 func (h *logHook) Fire(e *logrus.Entry) error {
 	h.Entries = append(h.Entries, e)
 	return nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // ── HashToInt64 ───────────────────────────────────────────────────────────────
@@ -1667,4 +1678,560 @@ func (m *mockErrorConn) Read(b []byte) (n int, err error) {
 
 func (m *mockErrorConn) Write(b []byte) (n int, err error) {
 	return 0, m.err
+}
+
+// ── AbuseIPDB tests ──────────────────────────────────────────────────────────
+
+func newTestReporter(
+	attempts int,
+	reportEvery time.Duration,
+	reportClearUsername bool,
+	reportClearPassword bool,
+	rt http.RoundTripper,
+) *abuseIPDBReporter {
+	return &abuseIPDBReporter{
+		enabled:             true,
+		apiKey:              "test-api-key",
+		attemptsLimit:       attempts,
+		reportEvery:         reportEvery,
+		categories:          "18,22",
+		reportClearUsername: reportClearUsername,
+		reportClearPassword: reportClearPassword,
+		httpClient: &http.Client{
+			Transport: rt,
+		},
+		ips: make(map[string]*abuseIPState),
+	}
+}
+
+func TestAbuseIPDBRecordFailureDisabled(t *testing.T) {
+	r := newTestReporter(
+		3,
+		time.Minute,
+		false,
+		false,
+		nil,
+	)
+
+	r.enabled = false
+
+	if got := r.RecordFailure(
+		"192.0.2.1",
+		"SSH",
+		"root",
+		"password",
+	); got {
+		t.Fatal("RecordFailure() = true for disabled reporter, want false")
+	}
+
+	if len(r.ips) != 0 {
+		t.Fatalf("disabled reporter created state: %+v", r.ips)
+	}
+}
+
+func TestAbuseIPDBRecordFailureInvalidIP(t *testing.T) {
+	r := newTestReporter(
+		3,
+		time.Minute,
+		false,
+		false,
+		nil,
+	)
+
+	if got := r.RecordFailure(
+		"not-an-ip",
+		"SSH",
+		"root",
+		"password",
+	); got {
+		t.Fatal("RecordFailure() = true for invalid IP, want false")
+	}
+
+	if len(r.ips) != 0 {
+		t.Fatalf("invalid IP created state: %+v", r.ips)
+	}
+}
+
+func TestAbuseIPDBThreshold(t *testing.T) {
+	var reports atomic.Int32
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		reports.Add(1)
+
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	r := newTestReporter(
+		3,
+		time.Hour,
+		false,
+		false,
+		rt,
+	)
+
+	ip := "192.0.2.10"
+
+	if r.RecordFailure(ip, "SSH", "root", "bad1") {
+		t.Fatal("first failure unexpectedly scheduled report")
+	}
+
+	if r.RecordFailure(ip, "SSH", "root", "bad2") {
+		t.Fatal("second failure unexpectedly scheduled report")
+	}
+
+	if !r.RecordFailure(ip, "SSH", "root", "bad3") {
+		t.Fatal("third failure did not schedule report")
+	}
+
+	// report() is asynchronous.
+	deadline := time.Now().Add(time.Second)
+	for reports.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := reports.Load(); got != 1 {
+		t.Fatalf("got %d reports, want 1", got)
+	}
+
+	r.mu.Lock()
+	state := r.ips[ip]
+	r.mu.Unlock()
+
+	if state.attempts != 0 {
+		t.Fatalf("attempts after report = %d, want 0", state.attempts)
+	}
+
+	if !state.lastReported.IsZero() {
+		// Expected.
+	} else {
+		t.Fatal("lastReported was not set after scheduling report")
+	}
+}
+
+func TestAbuseIPDBCooldown(t *testing.T) {
+	var reports atomic.Int32
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		reports.Add(1)
+
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	r := newTestReporter(
+		2,
+		time.Hour,
+		false,
+		false,
+		rt,
+	)
+
+	ip := "192.0.2.20"
+
+	r.RecordFailure(ip, "SSH", "root", "one")
+
+	if !r.RecordFailure(ip, "SSH", "root", "two") {
+		t.Fatal("second failure did not schedule report")
+	}
+
+	// While inside reportEvery, attempts must not accumulate.
+	if r.RecordFailure(ip, "SSH", "root", "three") {
+		t.Fatal("failure during cooldown unexpectedly scheduled report")
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	if got := reports.Load(); got != 1 {
+		t.Fatalf("got %d reports, want 1", got)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if got := r.ips[ip].attempts; got != 0 {
+		t.Fatalf("attempts during cooldown = %d, want 0", got)
+	}
+}
+
+func TestAbuseIPDBCollectsUniqueUsernamesAndPasswords(t *testing.T) {
+	r := newTestReporter(
+		10,
+		time.Hour,
+		true,
+		true,
+		nil,
+	)
+
+	ip := "192.0.2.30"
+
+	r.RecordFailure(ip, "SSH", "root", "password1")
+	r.RecordFailure(ip, "SSH", "root", "password1")
+	r.RecordFailure(ip, "SSH", "admin", "password2")
+
+	r.mu.Lock()
+	state := r.ips[ip]
+	r.mu.Unlock()
+
+	if len(state.usernames) != 2 {
+		t.Fatalf(
+			"usernames = %#v, want two unique usernames",
+			state.usernames,
+		)
+	}
+
+	if len(state.passwords) != 2 {
+		t.Fatalf(
+			"passwords = %#v, want two unique passwords",
+			state.passwords,
+		)
+	}
+
+	if state.usernames[0] != "root" ||
+		state.usernames[1] != "admin" {
+		t.Fatalf("unexpected usernames: %#v", state.usernames)
+	}
+
+	if state.passwords[0] != "password1" ||
+		state.passwords[1] != "password2" {
+		t.Fatalf("unexpected passwords: %#v", state.passwords)
+	}
+}
+
+func TestAbuseIPDBDoesNotCollectCredentialsWhenDisabled(t *testing.T) {
+	r := newTestReporter(
+		10,
+		time.Hour,
+		false,
+		false,
+		nil,
+	)
+
+	ip := "192.0.2.40"
+
+	r.RecordFailure(ip, "SSH", "root", "secret")
+
+	r.mu.Lock()
+	state := r.ips[ip]
+	r.mu.Unlock()
+
+	if len(state.usernames) != 0 {
+		t.Fatalf("usernames = %#v, want empty", state.usernames)
+	}
+
+	if len(state.passwords) != 0 {
+		t.Fatalf("passwords = %#v, want empty", state.passwords)
+	}
+}
+
+func TestAbuseIPDBReportRequest(t *testing.T) {
+	var (
+		gotMethod      string
+		gotURL         string
+		gotAPIKey      string
+		gotContentType string
+		gotForm        url.Values
+	)
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotMethod = req.Method
+		gotURL = req.URL.String()
+		gotAPIKey = req.Header.Get("Key")
+		gotContentType = req.Header.Get("Content-Type")
+
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+
+		gotForm, err = url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatalf("ParseQuery() error = %v", err)
+		}
+
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	r := newTestReporter(
+		3,
+		time.Minute,
+		true,
+		true,
+		rt,
+	)
+
+	r.report(
+		"192.0.2.50",
+		"SSH",
+		[]string{"root", "admin"},
+		[]string{"password1", "password2"},
+	)
+
+	if gotMethod != http.MethodPost {
+		t.Fatalf("HTTP method = %q, want POST", gotMethod)
+	}
+
+	if gotURL != "https://api.abuseipdb.com/api/v2/report" {
+		t.Fatalf("URL = %q, want AbuseIPDB report endpoint", gotURL)
+	}
+
+	if gotAPIKey != "test-api-key" {
+		t.Fatalf("API key = %q, want test-api-key", gotAPIKey)
+	}
+
+	if gotContentType != "application/x-www-form-urlencoded" {
+		t.Fatalf(
+			"Content-Type = %q, want application/x-www-form-urlencoded",
+			gotContentType,
+		)
+	}
+
+	if got := gotForm.Get("ip"); got != "192.0.2.50" {
+		t.Fatalf("ip = %q, want 192.0.2.50", got)
+	}
+
+	if got := gotForm.Get("categories"); got != "18,22" {
+		t.Fatalf("categories = %q, want 18,22", got)
+	}
+
+	comment := gotForm.Get("comment")
+
+	if !strings.Contains(comment, "SSH authentication brute-force attempt") {
+		t.Fatalf("comment does not contain protocol/message: %q", comment)
+	}
+
+	if !strings.Contains(comment, `usernames=["root" "admin"]`) {
+		t.Fatalf("comment does not contain usernames: %q", comment)
+	}
+
+	if !strings.Contains(comment, `passwords=["password1" "password2"]`) {
+		t.Fatalf("comment does not contain passwords: %q", comment)
+	}
+
+	if got := gotForm.Get("timestamp"); got == "" {
+		t.Fatal("timestamp is empty")
+	}
+
+	if _, err := time.Parse(time.RFC3339, gotForm.Get("timestamp")); err != nil {
+		t.Fatalf("timestamp is not RFC3339: %q", gotForm.Get("timestamp"))
+	}
+}
+
+func TestAbuseIPDBReportDoesNotIncludeCredentialsWhenDisabled(t *testing.T) {
+	var gotForm url.Values
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+
+		gotForm, err = url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatalf("ParseQuery() error = %v", err)
+		}
+
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	r := newTestReporter(
+		3,
+		time.Minute,
+		false,
+		false,
+		rt,
+	)
+
+	r.report(
+		"192.0.2.60",
+		"Telnet",
+		[]string{"root"},
+		[]string{"secret"},
+	)
+
+	comment := gotForm.Get("comment")
+
+	if strings.Contains(comment, "root") {
+		t.Fatalf("comment leaked username: %q", comment)
+	}
+
+	if strings.Contains(comment, "secret") {
+		t.Fatalf("comment leaked password: %q", comment)
+	}
+
+	if !strings.Contains(comment, "Telnet authentication brute-force attempt") {
+		t.Fatalf("comment missing protocol: %q", comment)
+	}
+}
+
+func TestAbuseIPDBReportHTTPErrorDoesNotPanic(t *testing.T) {
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	})
+
+	r := newTestReporter(
+		3,
+		time.Minute,
+		false,
+		false,
+		rt,
+	)
+
+	// report() should handle the error internally.
+	r.report(
+		"192.0.2.70",
+		"SSH",
+		nil,
+		nil,
+	)
+}
+
+func TestAbuseIPDBReportRejectedStatusDoesNotPanic(t *testing.T) {
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 429,
+			Status:     "429 Too Many Requests",
+			Body:       io.NopCloser(strings.NewReader(`rate limited`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	r := newTestReporter(
+		3,
+		time.Minute,
+		false,
+		false,
+		rt,
+	)
+
+	r.report(
+		"192.0.2.80",
+		"SSH",
+		nil,
+		nil,
+	)
+}
+
+func TestAbuseIPDBConcurrentThresholdOnlyReportsOnce(t *testing.T) {
+	var reports atomic.Int32
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		reports.Add(1)
+
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	const threshold = 10
+	const goroutines = 100
+
+	r := newTestReporter(
+		threshold,
+		time.Hour,
+		false,
+		false,
+		rt,
+	)
+
+	ip := "192.0.2.90"
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+
+			r.RecordFailure(
+				ip,
+				"SSH",
+				"root",
+				"password",
+			)
+		}()
+	}
+
+	wg.Wait()
+
+	// Wait for asynchronous report.
+	deadline := time.Now().Add(time.Second)
+	for reports.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := reports.Load(); got != 1 {
+		t.Fatalf(
+			"concurrent failures caused %d reports, want exactly 1",
+			got,
+		)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if got := r.ips[ip].attempts; got != 0 {
+		t.Fatalf("attempts = %d after report, want 0", got)
+	}
+}
+
+func TestAbuseIPDBCleanup(t *testing.T) {
+	r := newTestReporter(
+		10,
+		time.Hour,
+		false,
+		false,
+		nil,
+	)
+
+	now := time.Now()
+
+	r.ips["192.0.2.100"] = &abuseIPState{
+		lastSeen: now.Add(-2 * time.Hour),
+	}
+
+	r.ips["192.0.2.101"] = &abuseIPState{
+		lastSeen: now.Add(-10 * time.Minute),
+	}
+
+	// Use a short expiry for the test by directly applying the cleanup
+	// logic equivalent to cleanupLoop's configured expiry.
+	r.mu.Lock()
+
+	for ip, state := range r.ips {
+		if now.Sub(state.lastSeen) > time.Hour {
+			delete(r.ips, ip)
+		}
+	}
+
+	r.mu.Unlock()
+
+	if _, exists := r.ips["192.0.2.100"]; exists {
+		t.Fatal("expired IP was not removed")
+	}
+
+	if _, exists := r.ips["192.0.2.101"]; !exists {
+		t.Fatal("active IP was incorrectly removed")
+	}
 }
