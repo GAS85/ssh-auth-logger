@@ -1,62 +1,63 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rsa"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net"
-	"os"
-	"strconv"
-	"time"
-	"strings"
-	"encoding/base64"
-	"bytes"
-	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
 const appName = "ssh-auth-logger"
+
 // const abuseIPDBCleanupInterval = 30 * time.Minute
 // const abuseIPDBStateExpiry = 2 * time.Hour
 
 var (
-	version       string
+	version string
 
-	telnetBind    string
+	telnetBind             string
 	telnetLogClearPassword bool
-	telnetRate   int
+	telnetRate             int
 
-	sshd_bind    string
-	sshd_key_key string
-	rate         int
-	maxAuthTries int
-	rsaBits      int    // only used if hostKeyType == "rsa"
-	profileScope string // "host" or "remote_ip"
-	sendBanner   bool
+	sshd_bind        string
+	sshd_key_key     string
+	rate             int
+	maxAuthTries     int
+	rsaBits          int    // only used if hostKeyType == "rsa"
+	profileScope     string // "host" or "remote_ip"
+	sendBanner       bool
 	logClearPassword bool
 
-	logger = logrus.WithFields(commonFields)
-	allowedLogFields map[string]bool
+	logger                  = logrus.WithFields(commonFields)
+	allowedLogFields        map[string]bool
 	errAuthenticationFailed = errors.New(":)")
-	commonFields = logrus.Fields{
+	commonFields            = logrus.Fields{
 		"destinationServicename": "sshd",
 		"product":                appName,
 	}
 
-	abuseIPDBEnabled        bool
-	abuseIPDBAPIKey         string
-	abuseIPDBAttempts       int
-	abuseIPDBReportInterval time.Duration
-	abuseIPDBCategories     string
+	abuseIPDBEnabled         bool
+	abuseIPDBAPIKey          string
+	abuseIPDBAttempts        int
+	abuseIPDBReportInterval  time.Duration
+	abuseIPDBCategories      string
 	abuseIPDBCleanupInterval time.Duration
 	abuseIPDBStateExpiry     time.Duration
 )
@@ -87,9 +88,9 @@ type serverProfile struct {
 
 // abuseIPState contains reporting state for one source IP.
 type abuseIPState struct {
-	attempts      int
-	lastReported  time.Time
-	lastSeen      time.Time
+	attempts     int
+	lastReported time.Time
+	lastSeen     time.Time
 }
 
 // abuseIPDBReporter tracks authentication failures per source IP and reports abusive IPs to AbuseIPDB once the configured threshold has been reached.
@@ -187,10 +188,10 @@ func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username string) bool {
 	// r.mu.Unlock()
 
 	logger.WithFields(logrus.Fields{
-		"ip":         ip,
-		"protocol":   protocol,
+		"ip":       ip,
+		"protocol": protocol,
 		// "username":   username,
-		"attempts":   r.attemptsLimit,
+		"attempts": r.attemptsLimit,
 		// "cooldown":   r.reportEvery.String(),
 	}).Info("AbuseIPDB: report threshold reached. Report IP.")
 
@@ -241,10 +242,10 @@ func (r *abuseIPDBReporter) report(ip, protocol, username string) {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		logger.WithFields(logrus.Fields{
-			"ip":         ip,
-			"status":     resp.Status,
-			"protocol":   protocol,
-			"username":   username,
+			"ip":       ip,
+			"status":   resp.Status,
+			"protocol": protocol,
+			"username": username,
 		}).Warn("AbuseIPDB: report rejected")
 
 		return
@@ -285,7 +286,7 @@ func (r *abuseIPDBReporter) cleanup() {
 
 	if removed > 0 {
 		logger.WithFields(logrus.Fields{
-			"removed": removed,
+			"removed":   removed,
 			"remaining": len(r.ips),
 		}).Debug("AbuseIPDB state cleanup completed")
 	}
@@ -300,7 +301,6 @@ func handleTelnetConnection(conn net.Conn) {
 		Info("Telnet connection")
 
 	limitedConn := newRateLimitedConn(conn, telnetRate)
-
 
 	// Determine profile key (same logic as SSH)
 	var profileKey string
@@ -722,7 +722,7 @@ func getServerProfile(host string) serverProfile {
 			}
 		}
 	}
-	
+
 	seed := HashToInt64([]byte("profile:"+host), []byte(sshd_key_key))
 	if seed < 0 {
 		seed = -seed
@@ -733,9 +733,9 @@ func getServerProfile(host string) serverProfile {
 func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	state := &authState{}
 	// per‑local host profile
-//	profile := getServerProfile(host)
+	//	profile := getServerProfile(host)
 	// per‑IP profile
-//	profile := getServerProfile(conn.RemoteAddr().String())
+	//	profile := getServerProfile(conn.RemoteAddr().String())
 
 	var actualHostKeyType string
 	// Determine the key for profile lookup
@@ -751,7 +751,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	}
 
 	profile := getServerProfile(profileKey)
-	
+
 	config := ssh.ServerConfig{
 		NoClientAuth: false,
 
@@ -796,8 +796,8 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
-					"keytype": key.Type(),
-					"fingerprint": ssh.FingerprintSHA256(key),
+					"keytype":         key.Type(),
+					"fingerprint":     ssh.FingerprintSHA256(key),
 					"server_key_type": actualHostKeyType,
 				}).Info("Request with key")
 
@@ -894,8 +894,8 @@ func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	}
 }
 
-//getEnvWithDefault returns the environment value for key
-//returning fallback instead if it is missing or blank
+// getEnvWithDefault returns the environment value for key
+// returning fallback instead if it is missing or blank
 func getEnvWithDefault(key, fallback string) string {
 	value := os.Getenv(key)
 	if value == "" {
@@ -928,14 +928,14 @@ func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	if f.Base == nil {
 		// Create a default JSON formatter with sensible defaults
 		baseFormatter = &logrus.JSONFormatter{
-			TimestampFormat: time.RFC3339Nano,
+			TimestampFormat:  time.RFC3339Nano,
 			DisableTimestamp: false,
-			PrettyPrint:     false,
+			PrettyPrint:      false,
 		}
 	} else {
 		baseFormatter = f.Base
 	}
-	
+
 	// Filter the fields
 	filtered := logrus.Fields{}
 	for k, v := range entry.Data {
@@ -947,11 +947,11 @@ func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 			filtered[k] = v
 		}
 	}
-	
+
 	// Create a new entry with filtered data
 	newEntry := *entry
 	newEntry.Data = filtered
-	
+
 	// Format using the base formatter
 	return baseFormatter.Format(&newEntry)
 }
@@ -1027,7 +1027,7 @@ func init() {
 	}
 
 	abuseIPDBStateExpiryStr := getEnvWithDefault("ABUSEIPDB_STATE_EXPIRY", "2h")
-	abuseIPDBStateExpiry, err =	time.ParseDuration(abuseIPDBStateExpiryStr)
+	abuseIPDBStateExpiry, err = time.ParseDuration(abuseIPDBStateExpiryStr)
 	if err != nil || abuseIPDBStateExpiry <= 0 {
 		logrus.Fatal("Invalid ABUSEIPDB_STATE_EXPIRY environment variable")
 	}
@@ -1057,7 +1057,7 @@ func init() {
 		"SSHD_PROFILE_SCOPE":        profileScope,
 		"SSHD_SEND_BANNER":          sendBanner,
 		"SSHD_LOG_CLEAR_PASSWORD":   logClearPassword,
-		"SSHD_LOGS_FILTER":	         logsEnv,
+		"SSHD_LOGS_FILTER":          logsEnv,
 		"TELNET_BIND":               telnetBind,
 		"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
 		"TELNET_RATE":               telnetRate,

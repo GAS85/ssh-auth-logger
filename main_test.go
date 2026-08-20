@@ -1185,12 +1185,12 @@ func TestRateLimitedConn_WriteWithConnectionClose(t *testing.T) {
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
-	
+
 	limited := newRateLimitedConn(server, 1000)
-	
+
 	// Close the server side - with pipe, this is immediately detectable
 	server.Close()
-	
+
 	// Try to write - should get error
 	_, err := limited.Write([]byte("test"))
 	if err == nil {
