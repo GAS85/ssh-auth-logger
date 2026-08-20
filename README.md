@@ -1,6 +1,6 @@
 # SSH Auth Logger
 
-A low/zero interaction ssh authentication logging honeypot
+A low/zero interaction ssh authentication logging honeypot. Initially developed by [JustinAzoff](https://github.com/JustinAzoff).
 
 [![Dev Build](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml/badge.svg?branch=dev)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml)
 [![Test Automation](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml/badge.svg)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml)
@@ -10,6 +10,11 @@ A low/zero interaction ssh authentication logging honeypot
 [![Docker Pulls][docker-pulls]][docker-hub]
 [![Docker Image Size][docker-size]][docker-hub]
 [![Docker Image Size][docker-size]][docker-hub]
+
+Donations:
+[![Buy me a coffee](https://img.shields.io/badge/Buy_me_a_coffee-grey?logo=buymeacoffee)](https://buymeacoffee.com/georgiy.sitnikov)
+[![PayPal](https://img.shields.io/badge/Paypal-grey?logo=paypal)](https://www.paypal.com/paypalme/GeorgiySitnikov)
+[![Github Sponsors](https://img.shields.io/badge/Github_sponsors-grey?logo=github)](https://github.com/sponsors/GAS85)
 
 [docker-hub]: https://hub.docker.com/r/gas85/ssh-auth-logger
 [docker-pulls]: https://img.shields.io/docker/pulls/gas85/ssh-auth-logger?logo=docker
@@ -24,6 +29,10 @@ ssh-auth-logger logs all authentication attempts as json making it easy to consu
 ### "Random" host keys
 
 ssh-auth-logger uses HMAC to hash the destination IP address and a key in order to generate a consistently "random" key for every responding IP address.  This means you can run ssh-auth-logger on a /16 and every ip address will appear with a different host key. Random sshd version reporting as well.
+
+### AbuseIPDB Reporting
+
+Optionally ssh-auth-logger will report IPs to the [AbuseIPDB](https://www.abuseipdb.com).
 
 ### Example log entry
 
@@ -82,7 +91,7 @@ networks:
 
 services:
   ssh-auth-logger:
-    image: justinazoff/ssh-auth-logger:latest
+    image: gas85/ssh-auth-logger:latest
     container_name: ssh-auth-logger
     environment:
       - TZ=Europe/Berlin                      # You can set Time Zone to see logs with your local time
@@ -98,10 +107,22 @@ services:
 #      - SSHD_LOG_CLEAR_PASSWORD=true          # Log Passwords as clear text or Base64 coded
 #      - SSHD_LOGS_FILTER=""                   # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product"
 #      - FORCE_SSH_PROFILE=dropbear            # Force profile to use, please refer to "serverProfiles" in main.go. Possible values: dropbear, OpenSSH_7.4, OpenSSH_7.9, OpenSSH_8.2, OpenSSH_8.4, OpenSSH_9.6
+
       # Telnet Part
 #      - TELNET_BIND=:2323                     # Port and interface telnetd to listen
 #      - TELNET_LOG_CLEAR_PASSWORD=true        # Log Passwords as clear text or Base64 coded
 #      - TELNET_RATE=20                        # bits per second, emulate very slow connection
+
+      # AbuseIPDB Part
+#      - ABUSEIPDB_ENABLED=false               # Enable Abuse IP DB reporting
+#      - ABUSEIPDB_API_KEY=someKey             # Your Abuse IP DB API Key. Get one after registration: https://www.abuseipdb.com/account/api/keys
+#      - ABUSEIPDB_ATTEMPTS=10                 # Attempts amount when IP will be reported 
+#      - ABUSEIPDB_REPORT_INTERVAL=15m         # How often shall we report the same IP. 15 minutes is minimum. Please refer to Rate Limit in https://www.abuseipdb.com/api.html
+#      - ABUSEIPDB_CATEGORIES=18,22            # Report categories, please refer to https://www.abuseipdb.com/categories
+#      - ABUSEIPDB_CLEANUP_INTERVAL=30m        # Clean up IP table
+#      - ABUSEIPDB_STATE_EXPIRY=2h             # Interval when we will forget about IP's login attempt prior to report it
+#      - ABUSEIPDB_REPORT_CLEAR_USERNAME=false # Report User names to AbuseIPDB in a clear text
+#      - ABUSEIPDB_REPORT_CLEAR_PASSWORD=false # Report Passwords to AbuseIPDB in a clear text
     volumes:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log
@@ -183,6 +204,7 @@ enabled = true
 filter = ssh-auth-logger
 action = iptables-allports
          # Additonally you can setup abuseipdb reporting as per https://github.com/fail2ban/fail2ban/blob/master/config/action.d/abuseipdb.conf
+         # Or directly with ssh-auth-logger
          #abuseipdb[abuseipdb_category="18,22"]
 # Docker mount log to the localsystem
 logpath = /var/docker/ssh-auth-logger/log/ssh-auth-logger.log
