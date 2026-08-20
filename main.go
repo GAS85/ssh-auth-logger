@@ -53,13 +53,15 @@ var (
 		"product":                appName,
 	}
 
-	abuseIPDBEnabled         bool
-	abuseIPDBAPIKey          string
-	abuseIPDBAttempts        int
-	abuseIPDBReportInterval  time.Duration
-	abuseIPDBCategories      string
-	abuseIPDBCleanupInterval time.Duration
-	abuseIPDBStateExpiry     time.Duration
+	abuseIPDBEnabled             bool
+	abuseIPDBAPIKey              string
+	abuseIPDBAttempts            int
+	abuseIPDBReportInterval      time.Duration
+	abuseIPDBCategories          string
+	abuseIPDBCleanupInterval     time.Duration
+	abuseIPDBStateExpiry         time.Duration
+	abuseIPDBReportClearUsername bool
+	abuseIPDBReportClearPassword bool
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -91,6 +93,9 @@ type abuseIPState struct {
 	attempts     int
 	lastReported time.Time
 	lastSeen     time.Time
+	// Collect usernames and passwords for report
+	usernames []string
+	passwords []string
 }
 
 // abuseIPDBReporter tracks authentication failures per source IP and reports abusive IPs to AbuseIPDB once the configured threshold has been reached.
@@ -102,6 +107,9 @@ type abuseIPDBReporter struct {
 	attemptsLimit int
 	reportEvery   time.Duration
 	categories    string
+
+	reportClearUsername bool
+	reportClearPassword bool
 
 	httpClient *http.Client
 
@@ -116,6 +124,8 @@ func newAbuseIPDBReporter(
 	attemptsLimit int,
 	reportEvery time.Duration,
 	categories string,
+	reportClearUsername bool,
+	reportClearPassword bool,
 ) *abuseIPDBReporter {
 
 	r := &abuseIPDBReporter{
@@ -124,6 +134,9 @@ func newAbuseIPDBReporter(
 		attemptsLimit: attemptsLimit,
 		reportEvery:   reportEvery,
 		categories:    categories,
+
+		reportClearUsername: reportClearUsername,
+		reportClearPassword: reportClearPassword,
 
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
@@ -142,7 +155,7 @@ func newAbuseIPDBReporter(
 // RecordFailure records a failed authentication attempt.
 // Once the configured number of attempts has been reached, the IP is reported asynchronously to AbuseIPDB.
 // Returns true if this call caused a report to be scheduled.
-func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username string) bool {
+func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username, password string) bool {
 	if !r.enabled {
 		return false
 	}
@@ -155,7 +168,7 @@ func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username string) bool {
 	now := time.Now()
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	// defer r.mu.Unlock()
 
 	state, exists := r.ips[ip]
 	if !exists {
@@ -165,27 +178,44 @@ func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username string) bool {
 
 	state.lastSeen = now
 
+	// Collect usernames only if explicitly enabled.
+	if r.reportClearUsername && username != "" {
+		state.usernames = appendUnique(state.usernames, username)
+	}
+	// Collect credentials only if explicitly enabled.
+	if r.reportClearPassword && password != "" {
+		state.passwords = appendUnique(state.passwords, password)
+	}
+
 	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
 	if !state.lastReported.IsZero() &&
 		now.Sub(state.lastReported) < r.reportEvery {
 
-		// r.mu.Unlock()
+		r.mu.Unlock()
 		return false
 	}
 
 	state.attempts++
 
 	if state.attempts < r.attemptsLimit {
-		// r.mu.Unlock()
+		r.mu.Unlock()
 		return false
 	}
+
+	// Copy data before releasing the mutex.
+	usernames := append([]string(nil), state.usernames...)
+	passwords := append([]string(nil), state.passwords...)
+
+	// Reset the collected credentials for the next reporting window.
+	state.usernames = nil
+	state.passwords = nil
 
 	// Mark the IP as reported BEFORE starting the goroutine.
 	// If several authentication attempts arrive concurrently, only one of them should schedule a report.
 	state.lastReported = now
 	state.attempts = 0
 
-	// r.mu.Unlock()
+	r.mu.Unlock()
 
 	logger.WithFields(logrus.Fields{
 		"ip":       ip,
@@ -195,19 +225,37 @@ func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username string) bool {
 		// "cooldown":   r.reportEvery.String(),
 	}).Info("AbuseIPDB: report threshold reached. Report IP.")
 
-	go r.report(ip, protocol, username)
+	go r.report(ip, protocol, usernames, passwords)
 
 	return true
 }
 
 // report sends the actual AbuseIPDB request.
 // This is deliberately asynchronous so an external API problem cannot delay or interfere with SSH/Telnet authentication handling.
-func (r *abuseIPDBReporter) report(ip, protocol, username string) {
+func (r *abuseIPDBReporter) report(
+	ip string,
+	protocol string,
+	usernames []string,
+	passwords []string,
+) {
 	comment := fmt.Sprintf(
-		"%s authentication brute-force attempt against SSH/Telnet honeypot; username=%q",
+		"%s authentication brute-force attempt against SSH/Telnet honeypot",
 		protocol,
-		username,
 	)
+
+	if r.reportClearUsername && len(usernames) > 0 {
+		comment += fmt.Sprintf(
+			"; usernames=%q",
+			usernames,
+		)
+	}
+
+	if r.reportClearPassword && len(passwords) > 0 {
+		comment += fmt.Sprintf(
+			"; passwords=%q",
+			passwords,
+		)
+	}
 
 	form := url.Values{}
 	form.Set("ip", ip)
@@ -245,7 +293,6 @@ func (r *abuseIPDBReporter) report(ip, protocol, username string) {
 			"ip":       ip,
 			"status":   resp.Status,
 			"protocol": protocol,
-			"username": username,
 		}).Warn("AbuseIPDB: report rejected")
 
 		return
@@ -254,7 +301,6 @@ func (r *abuseIPDBReporter) report(ip, protocol, username string) {
 	logger.WithFields(logrus.Fields{
 		"ip":       ip,
 		"protocol": protocol,
-		"username": username,
 	}).Info("AbuseIPDB: IP reported")
 }
 
@@ -269,6 +315,7 @@ func (r *abuseIPDBReporter) cleanupLoop() {
 	}
 }
 
+// cleanup removes IPs that have not been seen for the configured state-expiry period.
 func (r *abuseIPDBReporter) cleanup() {
 	now := time.Now()
 
@@ -290,6 +337,16 @@ func (r *abuseIPDBReporter) cleanup() {
 			"remaining": len(r.ips),
 		}).Debug("AbuseIPDB state cleanup completed")
 	}
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+
+	return append(values, value)
 }
 
 // Telnet handler
@@ -361,6 +418,7 @@ func handleTelnetConnection(conn net.Conn) {
 			ip,
 			"Telnet",
 			string(username),
+			string(password),
 		)
 	}
 
@@ -781,6 +839,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 					ip,
 					"SSH",
 					conn.User(),
+					string(password),
 				)
 			}
 
@@ -809,6 +868,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 					ip,
 					"SSH",
 					conn.User(),
+					"",
 				)
 			}
 
@@ -1006,7 +1066,7 @@ func init() {
 
 	abuseIPDBAPIKey = os.Getenv("ABUSEIPDB_API_KEY")
 
-	abuseIPDBAttemptsStr := getEnvWithDefault("ABUSEIPDB_ATTEMPTS", "10")
+	abuseIPDBAttemptsStr := getEnvWithDefault("ABUSEIPDB_ATTEMPTS", "2")
 	abuseIPDBAttempts, err = strconv.Atoi(abuseIPDBAttemptsStr)
 	if err != nil || abuseIPDBAttempts <= 0 {
 		logrus.Fatal("Invalid ABUSEIPDB_ATTEMPTS environment variable")
@@ -1038,12 +1098,21 @@ func init() {
 		)
 	}
 
+	abuseIPDBReportClearUsernameStr := getEnvWithDefault("ABUSEIPDB_REPORT_CLEAR_USERNAME", "false")
+
+	abuseIPDBReportClearUsername = abuseIPDBReportClearUsernameStr == "1" || abuseIPDBReportClearUsernameStr == "true" || abuseIPDBReportClearUsernameStr == "yes"
+
+	abuseIPDBReportClearPasswordStr := getEnvWithDefault("ABUSEIPDB_REPORT_CLEAR_PASSWORD", "true")
+	abuseIPDBReportClearPassword = abuseIPDBReportClearPasswordStr == "1" || abuseIPDBReportClearPasswordStr == "true" || abuseIPDBReportClearPasswordStr == "yes"
+
 	abuseReporter = newAbuseIPDBReporter(
 		abuseIPDBEnabled,
 		abuseIPDBAPIKey,
 		abuseIPDBAttempts,
 		abuseIPDBReportInterval,
 		abuseIPDBCategories,
+		abuseIPDBReportClearUsername,
+		abuseIPDBReportClearPassword,
 	)
 
 	// Show Configuration on Startup
@@ -1070,6 +1139,8 @@ func init() {
 		startupFields["ABUSEIPDB_CATEGORIES"] = abuseIPDBCategories
 		startupFields["ABUSEIPDB_CLEANUP_INTERVAL"] = abuseIPDBCleanupInterval.String()
 		startupFields["ABUSEIPDB_STATE_EXPIRY"] = abuseIPDBStateExpiry.String()
+		startupFields["ABUSEIPDB_REPORT_CLEAR_USERNAME"] = abuseIPDBReportClearUsername
+		startupFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] = abuseIPDBReportClearPassword
 	}
 	logrus.WithFields(startupFields).Info("Starting SSH Auth Logger")
 
