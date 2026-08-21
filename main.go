@@ -5,9 +5,11 @@ import (
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -55,16 +57,17 @@ var (
 		"product":                appName,
 	}
 
-	abuseIPDBEnabled             bool
-	abuseIPDBAPIKey              string
-	abuseIPDBAttempts            int
-	abuseIPDBReportInterval      time.Duration
-	abuseIPDBSSHCategories       string // categories used when reporting SSH attempts
-	abuseIPDBTelnetCategories    string // categories used when reporting Telnet attempts
-	abuseIPDBCleanupInterval     time.Duration
-	abuseIPDBStateExpiry         time.Duration
-	abuseIPDBReportClearUsername bool
-	abuseIPDBReportClearPassword bool
+	abuseIPDBEnabled              bool
+	abuseIPDBAPIKey               string
+	abuseIPDBAttempts             int
+	abuseIPDBReportInterval       time.Duration
+	abuseIPDBSSHCategories        string // categories used when reporting SSH attempts
+	abuseIPDBTelnetCategories     string // categories used when reporting Telnet attempts
+	abuseIPDBCleanupInterval      time.Duration
+	abuseIPDBStateExpiry          time.Duration
+	abuseIPDBReportClearUsername  bool
+	abuseIPDBReportClearPassword  bool
+	abuseIPDBReportHashedPassword bool
 )
 
 // Maximum comment length (bytes) https://www.abuseipdb.com/api.html
@@ -119,8 +122,9 @@ type abuseIPDBReporter struct {
 	cleanupEvery time.Duration
 	stateExpiry  time.Duration
 
-	reportClearUsername bool
-	reportClearPassword bool
+	reportClearUsername  bool
+	reportClearPassword  bool
+	reportHashedPassword bool
 
 	httpClient *http.Client
 
@@ -148,6 +152,7 @@ func newAbuseIPDBReporter(
 	stateExpiry time.Duration,
 	reportClearUsername bool,
 	reportClearPassword bool,
+	reportHashedPassword bool,
 ) *abuseIPDBReporter {
 
 	r := &abuseIPDBReporter{
@@ -163,7 +168,9 @@ func newAbuseIPDBReporter(
 		stateExpiry:  stateExpiry,
 
 		reportClearUsername: reportClearUsername,
-		reportClearPassword: reportClearPassword,
+		// reportHashedPassword takes precedence over reportClearPassword. If both are set, cleartext passwords are never collected or sent
+		reportClearPassword:  reportClearPassword && !reportHashedPassword,
+		reportHashedPassword: reportHashedPassword,
 
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
@@ -209,9 +216,13 @@ func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username, password strin
 	if r.reportClearUsername && username != "" {
 		state.usernames = appendUnique(state.usernames, username)
 	}
-	// Collect credentials only if explicitly enabled.
-	if r.reportClearPassword && password != "" {
-		state.passwords = appendUnique(state.passwords, password)
+	// Collect credentials or SHA-1 hash only if explicitly enabled.
+	if (r.reportClearPassword || r.reportHashedPassword) && password != "" {
+		p := password
+		if r.reportHashedPassword {
+			p = sha1Hex(password)
+		}
+		state.passwords = appendUnique(state.passwords, p)
 	}
 
 	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
@@ -277,9 +288,14 @@ func (r *abuseIPDBReporter) report(
 		)
 	}
 
-	if r.reportClearPassword && len(passwords) > 0 {
+	if (r.reportClearPassword || r.reportHashedPassword) && len(passwords) > 0 {
+		field := "passwords"
+		if r.reportHashedPassword {
+			field = "passwords_sha1"
+		}
 		comment += fmt.Sprintf(
-			"; passwords=%q",
+			"; %s=%q",
+			field,
 			passwords,
 		)
 	}
@@ -372,7 +388,8 @@ func (r *abuseIPDBReporter) cleanup() {
 	}
 }
 
-// truncateUTF8 truncates s to at most maxBytes bytes without splitting a multi-byte rune in half.
+// truncateUTF8 truncates s to at most maxBytes bytes without splitting
+// a multi-byte rune in half.
 func truncateUTF8(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
@@ -382,6 +399,13 @@ func truncateUTF8(s string, maxBytes int) string {
 		b = b[:len(b)-1]
 	}
 	return b
+}
+
+// sha1Hex returns the hex-encoded SHA-1 digest of s.
+// SHA-1 is used here only to avoid publishing cleartext credentials to a public database, not as a secure password hash
+func sha1Hex(s string) string {
+	sum := sha1.Sum([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 func appendUnique(values []string, value string) []string {
@@ -1153,6 +1177,10 @@ func init() {
 	abuseIPDBReportClearPasswordStr := getEnvWithDefault("ABUSEIPDB_REPORT_CLEAR_PASSWORD", "false")
 	abuseIPDBReportClearPassword = abuseIPDBReportClearPasswordStr == "1" || abuseIPDBReportClearPasswordStr == "true" || abuseIPDBReportClearPasswordStr == "yes"
 
+	// ABUSEIPDB_REPORT_HASHED_PASSWORD overrides ABUSEIPDB_REPORT_CLEAR_PASSWORD when enabled, SHA-1 hashes are reported instead of cleartext passwords.
+	abuseIPDBReportHashedPasswordStr := getEnvWithDefault("ABUSEIPDB_REPORT_HASHED_PASSWORD", "false")
+	abuseIPDBReportHashedPassword = abuseIPDBReportHashedPasswordStr == "1" || abuseIPDBReportHashedPasswordStr == "true" || abuseIPDBReportHashedPasswordStr == "yes"
+
 	abuseReporter = newAbuseIPDBReporter(
 		abuseIPDBEnabled,
 		abuseIPDBAPIKey,
@@ -1164,6 +1192,7 @@ func init() {
 		abuseIPDBStateExpiry,
 		abuseIPDBReportClearUsername,
 		abuseIPDBReportClearPassword,
+		abuseIPDBReportHashedPassword,
 	)
 
 	// Show Configuration on Startup
@@ -1192,7 +1221,8 @@ func init() {
 		startupFields["ABUSEIPDB_CLEANUP_INTERVAL"] = abuseIPDBCleanupInterval.String()
 		startupFields["ABUSEIPDB_STATE_EXPIRY"] = abuseIPDBStateExpiry.String()
 		startupFields["ABUSEIPDB_REPORT_CLEAR_USERNAME"] = abuseIPDBReportClearUsername
-		startupFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] = abuseIPDBReportClearPassword
+		startupFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] = abuseReporter.reportClearPassword
+		startupFields["ABUSEIPDB_REPORT_HASHED_PASSWORD"] = abuseReporter.reportHashedPassword
 	}
 	logrus.WithFields(startupFields).Info("Starting SSH Auth Logger")
 

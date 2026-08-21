@@ -1689,15 +1689,37 @@ func newTestReporter(
 	reportClearPassword bool,
 	rt http.RoundTripper,
 ) *abuseIPDBReporter {
+	return newTestReporterWithPasswordMode(
+		attempts,
+		reportEvery,
+		reportClearUsername,
+		reportClearPassword,
+		false,
+		rt,
+	)
+}
+
+// newTestReporterWithPasswordMode is like newTestReporter but also lets tests
+// set reportHashedPassword, mirroring newAbuseIPDBReporter's precedence rule
+// (hashed overrides clear) instead of constructing the struct literal directly.
+func newTestReporterWithPasswordMode(
+	attempts int,
+	reportEvery time.Duration,
+	reportClearUsername bool,
+	reportClearPassword bool,
+	reportHashedPassword bool,
+	rt http.RoundTripper,
+) *abuseIPDBReporter {
 	return &abuseIPDBReporter{
-		enabled:             true,
-		apiKey:              "test-api-key",
-		attemptsLimit:       attempts,
-		reportEvery:         reportEvery,
-		sshCategories:       "18,22",
-		telnetCategories:    "14,18,23",
-		reportClearUsername: reportClearUsername,
-		reportClearPassword: reportClearPassword,
+		enabled:              true,
+		apiKey:               "test-api-key",
+		attemptsLimit:        attempts,
+		reportEvery:          reportEvery,
+		sshCategories:        "18,22",
+		telnetCategories:     "14,18,23",
+		reportClearUsername:  reportClearUsername,
+		reportClearPassword:  reportClearPassword && !reportHashedPassword,
+		reportHashedPassword: reportHashedPassword,
 		httpClient: &http.Client{
 			Transport: rt,
 		},
@@ -1933,6 +1955,73 @@ func TestAbuseIPDBDoesNotCollectCredentialsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestAbuseIPDBCollectsHashedPasswordInsteadOfClear(t *testing.T) {
+	r := newTestReporterWithPasswordMode(
+		10,
+		time.Hour,
+		false,
+		true, // reportClearPassword requested...
+		true, // ...but reportHashedPassword should take precedence
+		nil,
+	)
+
+	if r.reportClearPassword {
+		t.Fatal("reportClearPassword should be forced false when reportHashedPassword is true")
+	}
+
+	ip := "192.0.2.41"
+
+	r.RecordFailure(ip, "SSH", "root", "secret")
+
+	r.mu.Lock()
+	state := r.ips[ip]
+	r.mu.Unlock()
+
+	if len(state.passwords) != 1 {
+		t.Fatalf("passwords = %#v, want exactly one hashed entry", state.passwords)
+	}
+
+	wantHash := sha1Hex("secret")
+
+	if state.passwords[0] != wantHash {
+		t.Fatalf("password = %q, want SHA-1 hash %q", state.passwords[0], wantHash)
+	}
+
+	if state.passwords[0] == "secret" {
+		t.Fatal("cleartext password must not be stored when hashing is enabled")
+	}
+}
+
+func TestAbuseIPDBHashedPasswordOverridesClearPassword(t *testing.T) {
+	r := newTestReporterWithPasswordMode(
+		10,
+		time.Hour,
+		false,
+		true,
+		true,
+		nil,
+	)
+
+	ip := "192.0.2.42"
+
+	r.RecordFailure(ip, "SSH", "root", "hunter2")
+
+	r.mu.Lock()
+	state := r.ips[ip]
+	r.mu.Unlock()
+
+	// Only the hash should be present; cleartext must never coexist with it.
+	if len(state.passwords) != 1 {
+		t.Fatalf("passwords = %#v, want exactly one entry", state.passwords)
+	}
+
+	for _, p := range state.passwords {
+		if p == "hunter2" {
+			t.Fatal("cleartext password leaked despite reportHashedPassword being set")
+		}
+	}
+}
+
 func TestAbuseIPDBReportRequest(t *testing.T) {
 	var (
 		gotMethod      string
@@ -2074,6 +2163,61 @@ func TestAbuseIPDBReportUsesTelnetCategoriesForTelnetProtocol(t *testing.T) {
 
 	if got := gotForm.Get("categories"); got == r.sshCategories {
 		t.Fatalf("Telnet report used sshCategories %q instead of telnetCategories", got)
+	}
+}
+
+func TestAbuseIPDBReportSendsHashedPasswordNotCleartext(t *testing.T) {
+	var gotForm url.Values
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+
+		gotForm, err = url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatalf("ParseQuery() error = %v", err)
+		}
+
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	r := newTestReporterWithPasswordMode(
+		3,
+		time.Minute,
+		true,
+		true, // reportClearPassword requested...
+		true, // ...but reportHashedPassword should win
+		rt,
+	)
+
+	wantHash := sha1Hex("hunter2")
+
+	r.report(
+		"192.0.2.66",
+		"SSH",
+		[]string{"root"},
+		[]string{wantHash}, // report() receives whatever RecordFailure already collected
+	)
+
+	comment := gotForm.Get("comment")
+
+	if strings.Contains(comment, "hunter2") {
+		t.Fatalf("comment leaked cleartext password: %q", comment)
+	}
+
+	if !strings.Contains(comment, "passwords_sha1=") {
+		t.Fatalf("comment missing passwords_sha1 field: %q", comment)
+	}
+
+	if !strings.Contains(comment, wantHash) {
+		t.Fatalf("comment does not contain expected hash %q: %q", wantHash, comment)
 	}
 }
 
