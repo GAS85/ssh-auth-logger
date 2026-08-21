@@ -103,7 +103,7 @@ services:
       - TZ=Europe/Berlin                       # You can set Time Zone to see logs with your local time
       # Following are default values
       # SSHD Part
-#      - SSHD_RATE=320                         # bits per second, emulate very slow connection
+#      - SSHD_RATE=500                         # bits per second, emulate very slow connection
 #      - SSHD_BIND=:2222                       # Port and interface sshd to listen
 #      - SSHD_KEY_KEY="Take me to your leader" # It's a secret key that is used to generate a deterministic hash value for a given host IP address
 #      - SSHD_MAX_AUTH_TRIES=6                 # The minimum number of authentication attempts allowed
@@ -117,7 +117,7 @@ services:
       # Telnet Part
 #      - TELNET_BIND=:2323                     # Port and interface telnetd to listen
 #      - TELNET_LOG_CLEAR_PASSWORD=true        # Log Passwords as clear text or Base64 coded
-#      - TELNET_RATE=20                        # bits per second, emulate very slow connection
+#      - TELNET_RATE=100                       # bits per second, emulate very slow connection
 
       # AbuseIPDB Part
 #      - ABUSEIPDB_ENABLED=false               # Enable Abuse IP DB reporting
