@@ -1694,7 +1694,8 @@ func newTestReporter(
 		apiKey:              "test-api-key",
 		attemptsLimit:       attempts,
 		reportEvery:         reportEvery,
-		categories:          "18,22",
+		sshCategories:       "18,22",
+		telnetCategories:    "14,18,23",
 		reportClearUsername: reportClearUsername,
 		reportClearPassword: reportClearPassword,
 		httpClient: &http.Client{
@@ -2027,6 +2028,52 @@ func TestAbuseIPDBReportRequest(t *testing.T) {
 
 	if _, err := time.Parse(time.RFC3339, gotForm.Get("timestamp")); err != nil {
 		t.Fatalf("timestamp is not RFC3339: %q", gotForm.Get("timestamp"))
+	}
+}
+
+func TestAbuseIPDBReportUsesTelnetCategoriesForTelnetProtocol(t *testing.T) {
+	var gotForm url.Values
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+
+		gotForm, err = url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatalf("ParseQuery() error = %v", err)
+		}
+
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	r := newTestReporter(
+		3,
+		time.Minute,
+		false,
+		false,
+		rt,
+	)
+
+	r.report(
+		"192.0.2.65",
+		"Telnet",
+		nil,
+		nil,
+	)
+
+	if got := gotForm.Get("categories"); got != r.telnetCategories {
+		t.Fatalf("categories = %q, want telnetCategories %q", got, r.telnetCategories)
+	}
+
+	if got := gotForm.Get("categories"); got == r.sshCategories {
+		t.Fatalf("Telnet report used sshCategories %q instead of telnetCategories", got)
 	}
 }
 

@@ -118,7 +118,8 @@ services:
 #      - ABUSEIPDB_API_KEY=someKey             # Your Abuse IP DB API Key. Get one after registration: https://www.abuseipdb.com/account/api/keys
 #      - ABUSEIPDB_ATTEMPTS=10                 # Attempts amount when IP will be reported 
 #      - ABUSEIPDB_REPORT_INTERVAL=15m         # How often shall we report the same IP. 15 minutes is minimum. Please refer to Rate Limit in https://www.abuseipdb.com/api.html
-#      - ABUSEIPDB_CATEGORIES=18,22            # Report categories, please refer to https://www.abuseipdb.com/categories
+#      - ABUSEIPDB_SSH_CATEGORIES=18,22        # Report categories, please refer to https://www.abuseipdb.com/categories
+#      - ABUSEIPDB_TELNET_CATEGORIES=14,18,23  # Report categories, please refer to https://www.abuseipdb.com/categories
 #      - ABUSEIPDB_CLEANUP_INTERVAL=30m        # Clean up IP table
 #      - ABUSEIPDB_STATE_EXPIRY=2h             # Interval when we will forget about IP's login attempt prior to report it
 #      - ABUSEIPDB_REPORT_CLEAR_USERNAME=false # Report User names to AbuseIPDB in a clear text
@@ -138,13 +139,14 @@ services:
         limits:
           cpus: '0.50'
           memory: 100M
-    healthcheck:
-      # Will test if port is still open AND log file was not vanished by host machine log rotate
-      test: pgrep ssh-auth-logger && test -s /var/log/ssh-auth-logger.log || exit 1
-      interval: 5m00s
-      timeout: 5s
-      retries: 2
-      start_period: 5s
+    # Health check is build in, so you do not needed it. Use only if you will set different test or parameters.
+    # healthcheck:
+    #   # Will test if port application is up AND log file was not vanished by host machine log rotate
+    #   test: nc -zv localhost:$$SSHD_BIND && test -s /var/log/ssh-auth-logger.log || exit 1
+    #   interval: 5m00s
+    #   timeout: 5s
+    #   retries: 2
+    #   start_period: 5s
     logging:
       driver: json-file
       options:
