@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -1019,6 +1020,76 @@ func TestGetHost_ValidAddr(t *testing.T) {
 
 // TestGetHost_InvalidAddr is removed because it causes logrus.Fatal which exits the test
 // The fatal error path is intentionally not tested as it's an unrecoverable error
+
+func TestResolveProfileKey_RemoteIPScope(t *testing.T) {
+	testCases := []struct {
+		name       string
+		remoteAddr net.Addr
+		want       string
+	}{
+		{
+			name:       "IPv4 host:port",
+			remoteAddr: &mockAddr{net: "tcp", str: "203.0.113.9:54321"},
+			want:       "203.0.113.9",
+		},
+		{
+			name:       "IPv6 host:port",
+			remoteAddr: &mockAddr{net: "tcp", str: "[2001:db8::1]:2222"},
+			want:       "2001:db8::1",
+		},
+		{
+			name: "unsplittable address falls back to full string",
+			// No port separator, so net.SplitHostPort fails and the
+			// raw string is used as-is (the documented fallback path).
+			remoteAddr: &mockAddr{net: "tcp", str: "not-a-host-port"},
+			want:       "not-a-host-port",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &mockConn{
+				remoteAddr: tc.remoteAddr,
+				localAddr:  &mockAddr{net: "tcp", str: "10.0.0.1:22"},
+			}
+
+			got := resolveProfileKey("remote_ip", conn)
+			if got != tc.want {
+				t.Errorf("resolveProfileKey(%q, remoteAddr=%q) = %q, want %q", "remote_ip", tc.remoteAddr.String(), got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveProfileKey_HostScope(t *testing.T) {
+	testCases := []struct {
+		name  string
+		scope string
+	}{
+		{name: "explicit host scope", scope: "host"},
+		{name: "default/empty scope falls back to host", scope: ""},
+		{name: "unrecognized scope falls back to host", scope: "something-else"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &mockConn{
+				// Deliberately different from LocalAddr so the test fails
+				// loudly if the wrong address is used for this scope.
+				remoteAddr: &mockAddr{net: "tcp", str: "203.0.113.9:54321"},
+				localAddr:  &mockAddr{net: "tcp", str: "192.0.2.55:2222"},
+			}
+
+			want := "192.0.2.55"
+
+			got := resolveProfileKey(tc.scope, conn)
+			if got != want {
+				t.Errorf("resolveProfileKey(%q, ...) = %q, want %q", tc.scope, got, want)
+			}
+		})
+	}
+}
+
 // TestFilteredJSONFormatter_NilBaseHandling tests nil Base formatter
 func TestFilteredJSONFormatter_NilBaseHandling(t *testing.T) {
 	// Test with nil Base - the formatter should use a default JSONFormatter
@@ -1678,6 +1749,89 @@ func (m *mockErrorConn) Read(b []byte) (n int, err error) {
 
 func (m *mockErrorConn) Write(b []byte) (n int, err error) {
 	return 0, m.err
+}
+
+// ── truncateUTF8 tests ───────────────────────────────────────────────────────
+
+func TestTruncateUTF8_ShorterThanLimit(t *testing.T) {
+	got := truncateUTF8("hello", 100)
+	if got != "hello" {
+		t.Errorf("truncateUTF8() = %q, want unchanged %q", got, "hello")
+	}
+}
+
+func TestTruncateUTF8_ExactlyAtLimit(t *testing.T) {
+	s := "hello"
+	got := truncateUTF8(s, len(s))
+	if got != s {
+		t.Errorf("truncateUTF8() = %q, want unchanged %q", got, s)
+	}
+}
+
+func TestTruncateUTF8_ASCIITruncation(t *testing.T) {
+	got := truncateUTF8("hello world", 5)
+	if got != "hello" {
+		t.Errorf("truncateUTF8() = %q, want %q", got, "hello")
+	}
+	if len(got) > 5 {
+		t.Errorf("truncateUTF8() returned %d bytes, want <= 5", len(got))
+	}
+}
+
+func TestTruncateUTF8_DoesNotSplitMultiByteRune(t *testing.T) {
+	// "café" is c(1) a(1) f(1) é(2 bytes in UTF-8) = 5 bytes total.
+	// Truncating to 4 bytes would land in the middle of 'é'.
+	s := "café"
+	if len(s) != 5 {
+		t.Fatalf("test fixture assumption broken: len(%q) = %d, want 5", s, len(s))
+	}
+
+	got := truncateUTF8(s, 4)
+
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateUTF8(%q, 4) = %q, not valid UTF-8", s, got)
+	}
+
+	// The dangling first byte of 'é' must have been dropped, leaving "caf".
+	if got != "caf" {
+		t.Errorf("truncateUTF8(%q, 4) = %q, want %q", s, got, "caf")
+	}
+}
+
+func TestTruncateUTF8_MultiByteRuneAtExactBoundary(t *testing.T) {
+	s := "café" // 5 bytes, 'é' occupies the last 2
+	got := truncateUTF8(s, 5)
+	if got != s {
+		t.Errorf("truncateUTF8() = %q, want unchanged %q", got, s)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateUTF8() produced invalid UTF-8: %q", got)
+	}
+}
+
+func TestTruncateUTF8_EntireStringIsOneMultiByteRune(t *testing.T) {
+	// A single 3-byte rune truncated to fewer bytes than it needs
+	// should back off all the way to an empty string rather than
+	// return an invalid partial rune.
+	s := "€" // 3 bytes
+	got := truncateUTF8(s, 2)
+	if got != "" {
+		t.Errorf("truncateUTF8(%q, 2) = %q, want empty string", s, got)
+	}
+}
+
+func TestTruncateUTF8_ZeroMaxBytes(t *testing.T) {
+	got := truncateUTF8("hello", 0)
+	if got != "" {
+		t.Errorf("truncateUTF8() = %q, want empty string", got)
+	}
+}
+
+func TestTruncateUTF8_EmptyInput(t *testing.T) {
+	got := truncateUTF8("", 10)
+	if got != "" {
+		t.Errorf("truncateUTF8() = %q, want empty string", got)
+	}
 }
 
 // ── AbuseIPDB tests ──────────────────────────────────────────────────────────

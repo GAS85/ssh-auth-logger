@@ -418,6 +418,18 @@ func appendUnique(values []string, value string) []string {
 	return append(values, value)
 }
 
+// resolveProfileKey determines the server-profile lookup key for a connection. With scope "remote_ip", profiles are keyed by the client's IP (so the same attacker always sees the same fake host); any other scope (the default, "host") keys by the local listener address instead, so falls back to the full remote address string if it can't be split into host:port.
+func resolveProfileKey(scope string, conn net.Conn) string {
+	if scope == "remote_ip" {
+		host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+		if err != nil {
+			host = conn.RemoteAddr().String()
+		}
+		return host
+	}
+	return getHost(conn.LocalAddr().String())
+}
+
 // Telnet handler
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
@@ -429,16 +441,7 @@ func handleTelnetConnection(conn net.Conn) {
 	limitedConn := newRateLimitedConn(conn, telnetRate)
 
 	// Determine profile key (same logic as SSH)
-	var profileKey string
-	if profileScope == "remote_ip" {
-		host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
-		if err != nil {
-			host = conn.RemoteAddr().String()
-		}
-		profileKey = host
-	} else {
-		profileKey = getHost(conn.LocalAddr().String())
-	}
+	profileKey := resolveProfileKey(profileScope, conn)
 
 	profile := getServerProfile(profileKey)
 
@@ -866,16 +869,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 
 	var actualHostKeyType string
 	// Determine the key for profile lookup
-	var profileKey string
-	if profileScope == "remote_ip" {
-		host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
-		if err != nil {
-			host = conn.RemoteAddr().String() // fallback, should not happen
-		}
-		profileKey = host
-	} else { // default "host"
-		profileKey = getHost(conn.LocalAddr().String())
-	}
+	profileKey := resolveProfileKey(profileScope, conn)
 
 	profile := getServerProfile(profileKey)
 
