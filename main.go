@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -57,12 +59,16 @@ var (
 	abuseIPDBAPIKey              string
 	abuseIPDBAttempts            int
 	abuseIPDBReportInterval      time.Duration
-	abuseIPDBCategories          string
+	abuseIPDBSSHCategories       string // categories used when reporting SSH attempts
+	abuseIPDBTelnetCategories    string // categories used when reporting Telnet attempts
 	abuseIPDBCleanupInterval     time.Duration
 	abuseIPDBStateExpiry         time.Duration
 	abuseIPDBReportClearUsername bool
 	abuseIPDBReportClearPassword bool
 )
+
+// Maximum comment length (bytes) https://www.abuseipdb.com/api.html
+const abuseIPDBMaxCommentLen = 1024
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
 type rateLimitedConn struct {
@@ -106,7 +112,12 @@ type abuseIPDBReporter struct {
 	enabled       bool
 	attemptsLimit int
 	reportEvery   time.Duration
-	categories    string
+
+	sshCategories    string
+	telnetCategories string
+
+	cleanupEvery time.Duration
+	stateExpiry  time.Duration
 
 	reportClearUsername bool
 	reportClearPassword bool
@@ -116,6 +127,14 @@ type abuseIPDBReporter struct {
 	ips map[string]*abuseIPState
 }
 
+// categoriesFor returns the AbuseIPDB category list to use for the given protocol
+func (r *abuseIPDBReporter) categoriesFor(protocol string) string {
+	if strings.EqualFold(protocol, "Telnet") {
+		return r.telnetCategories
+	}
+	return r.sshCategories
+}
+
 var abuseReporter *abuseIPDBReporter
 
 func newAbuseIPDBReporter(
@@ -123,7 +142,10 @@ func newAbuseIPDBReporter(
 	apiKey string,
 	attemptsLimit int,
 	reportEvery time.Duration,
-	categories string,
+	sshCategories string,
+	telnetCategories string,
+	cleanupEvery time.Duration,
+	stateExpiry time.Duration,
 	reportClearUsername bool,
 	reportClearPassword bool,
 ) *abuseIPDBReporter {
@@ -133,7 +155,12 @@ func newAbuseIPDBReporter(
 		apiKey:        apiKey,
 		attemptsLimit: attemptsLimit,
 		reportEvery:   reportEvery,
-		categories:    categories,
+
+		sshCategories:    sshCategories,
+		telnetCategories: telnetCategories,
+
+		cleanupEvery: cleanupEvery,
+		stateExpiry:  stateExpiry,
 
 		reportClearUsername: reportClearUsername,
 		reportClearPassword: reportClearPassword,
@@ -257,9 +284,11 @@ func (r *abuseIPDBReporter) report(
 		)
 	}
 
+	comment = truncateUTF8(comment, abuseIPDBMaxCommentLen)
+
 	form := url.Values{}
 	form.Set("ip", ip)
-	form.Set("categories", r.categories)
+	form.Set("categories", r.categoriesFor(protocol))
 	form.Set("comment", comment)
 	form.Set("timestamp", time.Now().UTC().Format(time.RFC3339))
 
@@ -289,10 +318,14 @@ func (r *abuseIPDBReporter) report(
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Read a bounded amount of the body and put the actual rejection reason (bad category, invalid IP, rate limit, etc.) in the JSON error response, which is otherwise thrown away.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+
 		logger.WithFields(logrus.Fields{
 			"ip":       ip,
 			"status":   resp.Status,
 			"protocol": protocol,
+			"body":     string(body),
 		}).Warn("AbuseIPDB: report rejected")
 
 		return
@@ -306,7 +339,7 @@ func (r *abuseIPDBReporter) report(
 
 // AbuseIPDB cleanup the state
 func (r *abuseIPDBReporter) cleanupLoop() {
-	ticker := time.NewTicker(abuseIPDBCleanupInterval)
+	ticker := time.NewTicker(r.cleanupEvery)
 
 	defer ticker.Stop()
 
@@ -325,7 +358,7 @@ func (r *abuseIPDBReporter) cleanup() {
 	removed := 0
 
 	for ip, state := range r.ips {
-		if now.Sub(state.lastSeen) > abuseIPDBStateExpiry {
+		if now.Sub(state.lastSeen) > r.stateExpiry {
 			delete(r.ips, ip)
 			removed++
 		}
@@ -337,6 +370,18 @@ func (r *abuseIPDBReporter) cleanup() {
 			"remaining": len(r.ips),
 		}).Debug("AbuseIPDB state cleanup completed")
 	}
+}
+
+// truncateUTF8 truncates s to at most maxBytes bytes without splitting a multi-byte rune in half.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	b := s[:maxBytes]
+	for len(b) > 0 && !utf8.ValidString(b) {
+		b = b[:len(b)-1]
+	}
+	return b
 }
 
 func appendUnique(values []string, value string) []string {
@@ -1078,7 +1123,10 @@ func init() {
 		logrus.Fatal("Invalid ABUSEIPDB_REPORT_INTERVAL environment variable")
 	}
 
-	abuseIPDBCategories = getEnvWithDefault("ABUSEIPDB_CATEGORIES", "18,22")
+	// 18=Brute-Force, 22=SSH
+	abuseIPDBSSHCategories = getEnvWithDefault("ABUSEIPDB_SSH_CATEGORIES", "18,22")
+	// 14=Port Scan, 18=Brute-Force, 23=IoT Targeted
+	abuseIPDBTelnetCategories = getEnvWithDefault("ABUSEIPDB_TELNET_CATEGORIES", "14,18,23")
 
 	abuseIPDBCleanupIntervalStr := getEnvWithDefault("ABUSEIPDB_CLEANUP_INTERVAL", "30m")
 	abuseIPDBCleanupInterval, err = time.ParseDuration(abuseIPDBCleanupIntervalStr)
@@ -1110,7 +1158,10 @@ func init() {
 		abuseIPDBAPIKey,
 		abuseIPDBAttempts,
 		abuseIPDBReportInterval,
-		abuseIPDBCategories,
+		abuseIPDBSSHCategories,
+		abuseIPDBTelnetCategories,
+		abuseIPDBCleanupInterval,
+		abuseIPDBStateExpiry,
 		abuseIPDBReportClearUsername,
 		abuseIPDBReportClearPassword,
 	)
@@ -1136,7 +1187,8 @@ func init() {
 		startupFields["ABUSEIPDB_ENABLED"] = true
 		startupFields["ABUSEIPDB_ATTEMPTS"] = abuseIPDBAttempts
 		startupFields["ABUSEIPDB_REPORT_INTERVAL"] = abuseIPDBReportInterval.String()
-		startupFields["ABUSEIPDB_CATEGORIES"] = abuseIPDBCategories
+		startupFields["ABUSEIPDB_SSH_CATEGORIES"] = abuseIPDBSSHCategories
+		startupFields["ABUSEIPDB_TELNET_CATEGORIES"] = abuseIPDBTelnetCategories
 		startupFields["ABUSEIPDB_CLEANUP_INTERVAL"] = abuseIPDBCleanupInterval.String()
 		startupFields["ABUSEIPDB_STATE_EXPIRY"] = abuseIPDBStateExpiry.String()
 		startupFields["ABUSEIPDB_REPORT_CLEAR_USERNAME"] = abuseIPDBReportClearUsername
