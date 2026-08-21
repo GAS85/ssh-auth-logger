@@ -81,6 +81,12 @@ Bind to port 2222 in a host machine
 docker run -t -i --rm  -p 2222:2222 gas85/ssh-auth-logger:latest
 ```
 
+Test connections
+
+```shell
+ssh user@localhost -p 2222 -o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o UserKnownHostsFile=/dev/null -o NumberOfPasswordPrompts=10
+```
+
 Docker compose example:
 
 ```yaml
@@ -94,7 +100,7 @@ services:
     image: gas85/ssh-auth-logger:latest
     container_name: ssh-auth-logger
     environment:
-      - TZ=Europe/Berlin                      # You can set Time Zone to see logs with your local time
+      - TZ=Europe/Berlin                       # You can set Time Zone to see logs with your local time
       # Following are default values
       # SSHD Part
 #      - SSHD_RATE=320                         # bits per second, emulate very slow connection
@@ -106,7 +112,7 @@ services:
 #      - SSHD_SEND_BANNER=false                # Send SSH Login Banner before Password prompt
 #      - SSHD_LOG_CLEAR_PASSWORD=true          # Log Passwords as clear text or Base64 coded
 #      - SSHD_LOGS_FILTER=""                   # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product"
-#      - FORCE_SSH_PROFILE=dropbear            # Force profile to use, please refer to "serverProfiles" in main.go. Possible values: dropbear, OpenSSH_7.4, OpenSSH_7.9, OpenSSH_8.2, OpenSSH_8.4, OpenSSH_9.6
+#      - FORCE_SSH_PROFILE=dropbear            # Force profile to use, please refer to "serverProfiles" in main.go. Possible values: dropbear, OpenSSH_7.4, OpenSSH_7.9, OpenSSH_8.2, OpenSSH_8.4, OpenSSH_9.6. THERE IS NO DEFAULT VALUE FOR IT, it is not set --> all Profiles are used.
 
       # Telnet Part
 #      - TELNET_BIND=:2323                     # Port and interface telnetd to listen
@@ -117,13 +123,14 @@ services:
 #      - ABUSEIPDB_ENABLED=false               # Enable Abuse IP DB reporting
 #      - ABUSEIPDB_API_KEY=someKey             # Your Abuse IP DB API Key. Get one after registration: https://www.abuseipdb.com/account/api/keys
 #      - ABUSEIPDB_ATTEMPTS=10                 # Attempts amount when IP will be reported 
-#      - ABUSEIPDB_REPORT_INTERVAL=15m         # How often shall we report the same IP. 15 minutes is minimum. Please refer to Rate Limit in https://www.abuseipdb.com/api.html
-#      - ABUSEIPDB_SSH_CATEGORIES=18,22        # Report categories, please refer to https://www.abuseipdb.com/categories
-#      - ABUSEIPDB_TELNET_CATEGORIES=14,18,23  # Report categories, please refer to https://www.abuseipdb.com/categories
-#      - ABUSEIPDB_CLEANUP_INTERVAL=30m        # Clean up IP table
-#      - ABUSEIPDB_STATE_EXPIRY=2h             # Interval when we will forget about IP's login attempt prior to report it
+#      - ABUSEIPDB_REPORT_INTERVAL=15m         # How often shall we report the same IP. 15 minutes is a minimum. Please refer to Rate Limit in https://www.abuseipdb.com/api.html
+#      - ABUSEIPDB_SSH_CATEGORIES=18,22        # SSH Report categories, please refer to https://www.abuseipdb.com/categories
+#      - ABUSEIPDB_TELNET_CATEGORIES=14,18,23  # Telnet Report categories, please refer to https://www.abuseipdb.com/categories
+#      - ABUSEIPDB_CLEANUP_INTERVAL=30m        # Internal IP table clean up interval
+#      - ABUSEIPDB_STATE_EXPIRY=2h             # Interval when we will forget about IP's login attempts prior to report it
 #      - ABUSEIPDB_REPORT_CLEAR_USERNAME=false # Report User names to AbuseIPDB in a clear text
-#      - ABUSEIPDB_REPORT_CLEAR_PASSWORD=false # Report Passwords to AbuseIPDB in a clear text
+#      - ABUSEIPDB_REPORT_HASHED_PASSWORD=true # Report hashed Passwords to AbuseIPDB
+#      - ABUSEIPDB_REPORT_CLEAR_PASSWORD=false # Report Passwords to AbuseIPDB in a clear text. It is strongly recommended to use ABUSEIPDB_REPORT_HASHED_PASSWORD instead. Works only when report of hashed password is disabled
     volumes:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log

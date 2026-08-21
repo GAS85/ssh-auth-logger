@@ -1178,7 +1178,7 @@ func init() {
 	abuseIPDBReportClearPassword = abuseIPDBReportClearPasswordStr == "1" || abuseIPDBReportClearPasswordStr == "true" || abuseIPDBReportClearPasswordStr == "yes"
 
 	// ABUSEIPDB_REPORT_HASHED_PASSWORD overrides ABUSEIPDB_REPORT_CLEAR_PASSWORD when enabled, SHA-1 hashes are reported instead of cleartext passwords.
-	abuseIPDBReportHashedPasswordStr := getEnvWithDefault("ABUSEIPDB_REPORT_HASHED_PASSWORD", "false")
+	abuseIPDBReportHashedPasswordStr := getEnvWithDefault("ABUSEIPDB_REPORT_HASHED_PASSWORD", "true")
 	abuseIPDBReportHashedPassword = abuseIPDBReportHashedPasswordStr == "1" || abuseIPDBReportHashedPasswordStr == "true" || abuseIPDBReportHashedPasswordStr == "yes"
 
 	abuseReporter = newAbuseIPDBReporter(
