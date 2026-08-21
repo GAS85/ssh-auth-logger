@@ -250,7 +250,7 @@ func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username, password strin
 		// "username":   username,
 		"attempts": r.attemptsLimit,
 		// "cooldown":   r.reportEvery.String(),
-	}).Info("AbuseIPDB: report threshold reached. Report IP.")
+	}).Infof("AbuseIPDB: report threshold reached for %s. Report IP.", ip)
 
 	go r.report(ip, protocol, usernames, passwords)
 
@@ -326,7 +326,7 @@ func (r *abuseIPDBReporter) report(
 			"status":   resp.Status,
 			"protocol": protocol,
 			"body":     string(body),
-		}).Warn("AbuseIPDB: report rejected")
+		}).Warnf("AbuseIPDB: report rejected for %s", ip)
 
 		return
 	}
@@ -334,7 +334,7 @@ func (r *abuseIPDBReporter) report(
 	logger.WithFields(logrus.Fields{
 		"ip":       ip,
 		"protocol": protocol,
-	}).Info("AbuseIPDB: IP reported")
+	}).Infof("AbuseIPDB: IP %s reported", ip)
 }
 
 // AbuseIPDB cleanup the state
@@ -1150,7 +1150,7 @@ func init() {
 
 	abuseIPDBReportClearUsername = abuseIPDBReportClearUsernameStr == "1" || abuseIPDBReportClearUsernameStr == "true" || abuseIPDBReportClearUsernameStr == "yes"
 
-	abuseIPDBReportClearPasswordStr := getEnvWithDefault("ABUSEIPDB_REPORT_CLEAR_PASSWORD", "true")
+	abuseIPDBReportClearPasswordStr := getEnvWithDefault("ABUSEIPDB_REPORT_CLEAR_PASSWORD", "false")
 	abuseIPDBReportClearPassword = abuseIPDBReportClearPasswordStr == "1" || abuseIPDBReportClearPasswordStr == "true" || abuseIPDBReportClearPasswordStr == "yes"
 
 	abuseReporter = newAbuseIPDBReporter(
