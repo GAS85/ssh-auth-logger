@@ -34,7 +34,8 @@ const appName = "ssh-auth-logger"
 // const abuseIPDBStateExpiry = 2 * time.Hour
 
 var (
-	version string
+	version = "dev"
+	commit  = "unknown"
 
 	telnetBind             string
 	telnetLogClearPassword bool
@@ -277,7 +278,7 @@ func (r *abuseIPDBReporter) report(
 	passwords []string,
 ) {
 	comment := fmt.Sprintf(
-		"%s authentication brute-force attempt against SSH/Telnet honeypot",
+		"%s authentication brute-force attempt against GAS85/ssh-auth-logger honeypot",
 		protocol,
 	)
 
@@ -1083,6 +1084,7 @@ func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
 	version = getEnvWithDefault("VERSION", "dev")
+	commit = getEnvWithDefault("COMMIT", "unknown")
 
 	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
 
