@@ -62,25 +62,25 @@ This is normally logged on one line
 This is normally reported IP comment:
 
 ```plain
-SSH authentication brute-force attempt against SSH/Telnet honeypot
+SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot
 ```
 
 If you enable User names reporting, it will be add:
 
 ```plain
-SSH authentication brute-force attempt against SSH/Telnet honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]
+SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]
 ```
 
 If you enable Passwords hashes reporting, it will be add:
 
 ```plain
-SSH authentication brute-force attempt against SSH/Telnet honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords_sha1=["0bddc96375f465f6fd6462cc9481ab7605fe40b1" "060b3b99f88e96085b4a68e095bc9e3d1d91e1bc" "96900d99a52db0558d15a37766a4125762b75ac6" "94510c89ec1e494522c303497e6a6c0e71961f6a" "7f2c116fbdea1207e84a4ce066ce1617c1940ea6" "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8" "5036854299afc07432c453b340971eee638a585b" "0cf05b6e4c2b64372848a1d36afc00b36dd696ff" "937ab279a60dcaac3ba1b419b6ce1ecf7ec0a642" "a33a2383c34c63e28b3420cf30d644d9936d0af5"] 
+SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords_sha1=["0bddc96375f465f6fd6462cc9481ab7605fe40b1" "060b3b99f88e96085b4a68e095bc9e3d1d91e1bc" "96900d99a52db0558d15a37766a4125762b75ac6" "94510c89ec1e494522c303497e6a6c0e71961f6a" "7f2c116fbdea1207e84a4ce066ce1617c1940ea6" "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8" "5036854299afc07432c453b340971eee638a585b" "0cf05b6e4c2b64372848a1d36afc00b36dd696ff" "937ab279a60dcaac3ba1b419b6ce1ecf7ec0a642" "a33a2383c34c63e28b3420cf30d644d9936d0af5"] 
 ```
 
 You can enable plain passwords reporting via `ABUSEIPDB_REPORT_CLEAR_PASSWORD`, but this is **not recommended**, please report hashes instead.
 
 ```plain
-SSH authentication brute-force attempt against SSH/Telnet honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords=["123456" "123" "1234" "password" "12345678" "merry" "1234" "root] 
+SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords=["123456" "123" "1234" "password" "12345678" "merry" "1234" "root] 
 ```
 
 ## How to use it

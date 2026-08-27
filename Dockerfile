@@ -1,5 +1,9 @@
 FROM golang:alpine AS builder
 
+ARG VERSION=dev
+ARG VCS_REF=dev
+ARG BUILD_DATE=unknown
+
 WORKDIR /app
 
 COPY . .
