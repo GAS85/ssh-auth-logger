@@ -143,6 +143,8 @@ jobs:
             go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${VCS_REF}" \
             -o dist/ssh-auth-logger-${VERSION}-windows-amd64.exe .
 
+          sha256sum dist/* > dist/SHA256SUMS
+
       - name: Create GitHub Release
         # https://github.com/softprops/action-gh-release/releases/tag/v3.0.2
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
@@ -153,3 +155,61 @@ jobs:
           draft: true
           files: |
             dist/ssh-auth-logger-*
+            dist/SHA256SUMS
+
+  # Push to github
+  build-and-push-github:
+    runs-on: ubuntu-latest
+    needs: build-and-push 
+
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: prod
+
+    permissions:
+      packages: write
+
+    steps:
+      - name: Prepare image name
+        id: meta
+        run: |
+          echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          echo "REPO=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Docker Hub
+        # https://github.com/docker/login-action/releases/tag/v4.1.0
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Login to GitHub Container Registry
+        # https://github.com/docker/login-action/releases/tag/v4.1.0
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install crane
+        run: |
+          wget https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz -O - | \
+            tar -xz crane
+          sudo mv crane /usr/local/bin/
+
+      - name: Copy image from Docker Hub to GHCR
+        run: |
+          crane cp \
+            "docker.io/${{ steps.meta.outputs.REPO }}:${{ steps.meta.outputs.VERSION }}" \
+            "ghcr.io/${{ steps.meta.outputs.REPO }}:${{ steps.meta.outputs.VERSION }}"
+
+          crane mutate \
+            --label org.opencontainers.image.source="https://github.com/GAS85/ssh-auth-logger" \
+            "ghcr.io/${{ steps.meta.outputs.REPO }}:${{ steps.meta.outputs.VERSION }}"
+
+          crane cp \
+            "docker.io/${{ steps.meta.outputs.REPO }}:latest" \
+            "ghcr.io/${{ steps.meta.outputs.REPO }}:latest"
+
+          crane mutate \
+            --label org.opencontainers.image.source="https://github.com/GAS85/ssh-auth-logger" \
+            "ghcr.io/${{ steps.meta.outputs.REPO }}:latest"
