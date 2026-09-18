@@ -6,10 +6,15 @@ A low/zero interaction ssh authentication logging honeypot. Initially developed 
 [![Test Automation](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml/badge.svg)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml)
 [![Release Build and Push to Dockerhub](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-release.yml/badge.svg)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-release.yml)
 [![codecov](https://codecov.io/gh/GAS85/ssh-auth-logger/branch/main/graph/badge.svg)](https://codecov.io/gh/GAS85/ssh-auth-logger)
+
 [![Docker hub](https://img.shields.io/badge/Docker--hub-grey?logo=docker)][docker-hub]
 [![Docker Pulls][docker-pulls]][docker-hub]
 [![Docker Image Size][docker-size]][docker-hub]
 [![Docker Image Size][docker-size]][docker-hub]
+
+[![GHCR Latest Version](https://ghcr-badge.egpl.dev/gas85/ssh-auth-logger/latest_tag?color=%2344cc11&ignore=latest&label=ghcr+version)](https://github.com/GAS85/ssh-auth-logger/pkgs/container/ssh-auth-logger)
+[![GHCR Image size](https://ghcr-badge.egpl.dev/gas85/ssh-auth-logger/size?color=%2344cc11&tag=latest&label=image+size)](https://github.com/GAS85/ssh-auth-logger/pkgs/container/ssh-auth-logger)
+![ghcr pulls](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fghcr-badge.elias.eu.org%2Fapi%2FGAS85%2Fssh-auth-logger%2Fssh-auth-logger&query=downloadCount&label=ghcr+pulls&logo=github)
 
 Donations:
 [![Buy me a coffee](https://img.shields.io/badge/Buy_me_a_coffee-grey?logo=buymeacoffee)](https://buymeacoffee.com/georgiy.sitnikov)
