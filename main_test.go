@@ -2366,8 +2366,8 @@ func TestAbuseIPDBReportSendsHashedPasswordNotCleartext(t *testing.T) {
 		t.Fatalf("comment leaked cleartext password: %q", comment)
 	}
 
-	if !strings.Contains(comment, "passwords_sha1=") {
-		t.Fatalf("comment missing passwords_sha1 field: %q", comment)
+	if !strings.Contains(comment, "passwords sha1 prefix=") {
+		t.Fatalf("comment missing passwords sha1 prefix field: %q", comment)
 	}
 
 	if !strings.Contains(comment, wantHash) {
