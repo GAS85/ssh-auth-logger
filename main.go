@@ -221,7 +221,8 @@ func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username, password strin
 	if (r.reportClearPassword || r.reportHashedPassword) && password != "" {
 		p := password
 		if r.reportHashedPassword {
-			p = sha1Hex(password)
+			// Cut to the first 8 Symbols, as full SHA1 is easy to revert, kind of k-anonymity model
+			p = sha1Hex(password)[:8]
 		}
 		state.passwords = appendUnique(state.passwords, p)
 	}
