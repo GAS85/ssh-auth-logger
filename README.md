@@ -39,6 +39,12 @@ ssh-auth-logger uses HMAC to hash the destination IP address and a key in order 
 
 Optionally ssh-auth-logger will report IPs to the [AbuseIPDB](https://www.abuseipdb.com).
 
+Example of AbuseIPDB report:
+
+```plain
+SSH authentication brute-force attempt against GAS85/ssh-auth-logger honeypot; usernames=["sysadmin" "winter" "hardy" "esuser" "root" "rr" "jumpuser"]; passwords sha1 prefix=["d033e22a" "7c4a8d09" "44d4965a" "07c536c2" "c539153b" "843cbacc" "1530df65" "d8b93126" "0a27e12d" "c8eb02c9"]
+```
+
 ### Example log entry
 
 This is normally logged on one line
