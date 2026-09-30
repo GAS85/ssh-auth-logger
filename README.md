@@ -14,7 +14,7 @@ A low/zero interaction ssh authentication logging honeypot. Initially developed 
 
 [![GHCR Latest Version](https://ghcr-badge.egpl.dev/gas85/ssh-auth-logger/latest_tag?color=%2344cc11&ignore=latest&label=ghcr+version)](https://github.com/GAS85/ssh-auth-logger/pkgs/container/ssh-auth-logger)
 [![GHCR Image size](https://ghcr-badge.egpl.dev/gas85/ssh-auth-logger/size?color=%2344cc11&tag=latest&label=image+size)](https://github.com/GAS85/ssh-auth-logger/pkgs/container/ssh-auth-logger)
-![ghcr pulls](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fghcr-badge.elias.eu.org%2Fapi%2FGAS85%2Fssh-auth-logger%2Fssh-auth-logger&query=downloadCount&label=ghcr+pulls&logo=github)
+[![ghcr pulls](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fghcr-badge.elias.eu.org%2Fapi%2FGAS85%2Fssh-auth-logger%2Fssh-auth-logger&query=downloadCount&label=ghcr+pulls&logo=github)](https://github.com/GAS85/ssh-auth-logger/pkgs/container/ssh-auth-logger)
 
 Donations:
 [![Buy me a coffee](https://img.shields.io/badge/Buy_me_a_coffee-grey?logo=buymeacoffee)](https://buymeacoffee.com/georgiy.sitnikov)
