@@ -149,6 +149,8 @@ services:
       #- SSHD_LOG_CLEAR_PASSWORD=true          # Log Passwords as clear text or Base64 coded
       #- SSHD_LOGS_FILTER=""                   # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product"
       #- FORCE_SSH_PROFILE=dropbear            # Force profile to use, please refer to "serverProfiles" in main.go. Possible values: dropbear, OpenSSH_7.4, OpenSSH_7.9, OpenSSH_8.2, OpenSSH_8.4, OpenSSH_9.6. THERE IS NO DEFAULT VALUE FOR IT, it is not set --> all Profiles are used.
+      #- SSHD_HOST_KEY_CACHE_TTL="24h"         # Host key cache TTL to reduce CPU load by key generation from the same host. Default 24h.
+      #- SSHD_HOST_KEY_CACHE_CLEANUP="1h"      # Cache cleanup interval. Default 1h.
 
       # Telnet Part
 

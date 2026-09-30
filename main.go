@@ -58,6 +58,9 @@ var (
 		"product":                appName,
 	}
 
+	hostKeyCacheTTL     time.Duration
+	hostKeyCacheCleanup time.Duration
+
 	abuseIPDBEnabled              bool
 	abuseIPDBAPIKey               string
 	abuseIPDBAttempts             int
@@ -99,8 +102,8 @@ type hostKeyCache struct {
 	mu   sync.RWMutex
 	keys map[string]cachedHostKey
 
-	ttl           time.Duration
-	cleanupEvery  time.Duration
+	ttl          time.Duration
+	cleanupEvery time.Duration
 }
 
 // Create profile to match banner and Server Version
@@ -157,16 +160,7 @@ func (r *abuseIPDBReporter) categoriesFor(protocol string) string {
 
 var abuseReporter *abuseIPDBReporter
 
-// Define timers for cache cleanup
-const (
-	hostKeyCacheTTL          = 24 * time.Hour
-	hostKeyCacheCleanupEvery = 1 * time.Hour
-)
-
-var hostKeys = newHostKeyCache(
-	hostKeyCacheTTL,
-	hostKeyCacheCleanupEvery,
-)
+var hostKeys *hostKeyCache
 
 func newAbuseIPDBReporter(
 	enabled bool,
@@ -419,9 +413,9 @@ func (r *abuseIPDBReporter) cleanup() {
 // TTL-aware cache for a host key
 func newHostKeyCache(ttl, cleanupEvery time.Duration) *hostKeyCache {
 	c := &hostKeyCache{
-		keys:          make(map[string]cachedHostKey),
-		ttl:           ttl,
-		cleanupEvery:  cleanupEvery,
+		keys:         make(map[string]cachedHostKey),
+		ttl:          ttl,
+		cleanupEvery: cleanupEvery,
 	}
 
 	go c.cleanupLoop()
@@ -1247,6 +1241,25 @@ func init() {
 	// Comma-separated list of allowed fields, "" means all, " " means none
 	logsEnv := getEnvWithDefault("SSHD_LOGS_FILTER", "")
 
+	// Configure Host key cache TTL
+	hostKeyCacheTTLStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_TTL", "24h")
+	hostKeyCacheTTL, err := time.ParseDuration(hostKeyCacheTTLStr)
+	if err != nil || hostKeyCacheTTL <= 0 {
+		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_TTL")
+	}
+
+	// Configure cache cleanup interval
+	hostKeyCacheCleanupStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_CLEANUP", "1h")
+	hostKeyCacheCleanup, err := time.ParseDuration(hostKeyCacheCleanupStr)
+	if err != nil || hostKeyCacheCleanup <= 0 {
+		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_CLEANUP")
+	}
+
+	hostKeys = newHostKeyCache(
+		hostKeyCacheTTL,
+		hostKeyCacheCleanup,
+	)
+
 	// AbuseIPDB configuration
 	abuseIPDBEnabledStr := getEnvWithDefault("ABUSEIPDB_ENABLED", "false")
 	abuseIPDBEnabled = abuseIPDBEnabledStr == "1" || abuseIPDBEnabledStr == "true" || abuseIPDBEnabledStr == "yes"
@@ -1315,19 +1328,21 @@ func init() {
 
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
-		"Version":                   version,
-		"SSHD_BIND":                 sshd_bind,
-		"SSHD_KEY_KEY":              sshd_key_key,
-		"SSHD_RATE":                 rate,
-		"SSHD_MAX_AUTH_TRIES":       maxAuthTries,
-		"SSHD_RSA_BITS":             rsaBitsStr,
-		"SSHD_PROFILE_SCOPE":        profileScope,
-		"SSHD_SEND_BANNER":          sendBanner,
-		"SSHD_LOG_CLEAR_PASSWORD":   logClearPassword,
-		"SSHD_LOGS_FILTER":          logsEnv,
-		"TELNET_BIND":               telnetBind,
-		"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
-		"TELNET_RATE":               telnetRate,
+		"Version":                     version,
+		"SSHD_BIND":                   sshd_bind,
+		"SSHD_KEY_KEY":                sshd_key_key,
+		"SSHD_RATE":                   rate,
+		"SSHD_MAX_AUTH_TRIES":         maxAuthTries,
+		"SSHD_RSA_BITS":               rsaBitsStr,
+		"SSHD_PROFILE_SCOPE":          profileScope,
+		"SSHD_SEND_BANNER":            sendBanner,
+		"SSHD_LOG_CLEAR_PASSWORD":     logClearPassword,
+		"SSHD_LOGS_FILTER":            logsEnv,
+		"SSHD_HOST_KEY_CACHE_TTL":     hostKeyCacheTTL.String(),
+		"SSHD_HOST_KEY_CACHE_CLEANUP": hostKeyCacheCleanup.String(),
+		"TELNET_BIND":                 telnetBind,
+		"TELNET_LOG_CLEAR_PASSWORD":   telnetLogClearPassword,
+		"TELNET_RATE":                 telnetRate,
 	}
 	// Only show AbuseIPDB configuration when enabled.
 	if abuseIPDBEnabled {
