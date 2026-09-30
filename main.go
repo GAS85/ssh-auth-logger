@@ -90,15 +90,17 @@ type authState struct {
 
 // hostKeyCache caches generated SSH host keys.
 // Keys are stable for the lifetime of the process.
-type hostKeyCache struct {
-	mu   sync.RWMutex
-	keys map[string]ssh.Signer
+type cachedHostKey struct {
+	signer   ssh.Signer
+	lastUsed time.Time
 }
 
-func newHostKeyCache() *hostKeyCache {
-	return &hostKeyCache{
-		keys: make(map[string]ssh.Signer),
-	}
+type hostKeyCache struct {
+	mu   sync.RWMutex
+	keys map[string]cachedHostKey
+
+	ttl           time.Duration
+	cleanupEvery  time.Duration
 }
 
 // Create profile to match banner and Server Version
@@ -155,7 +157,16 @@ func (r *abuseIPDBReporter) categoriesFor(protocol string) string {
 
 var abuseReporter *abuseIPDBReporter
 
-var hostKeys = newHostKeyCache()
+// Define timers for cache cleanup
+const (
+	hostKeyCacheTTL          = 24 * time.Hour
+	hostKeyCacheCleanupEvery = 1 * time.Hour
+)
+
+var hostKeys = newHostKeyCache(
+	hostKeyCacheTTL,
+	hostKeyCacheCleanupEvery,
+)
 
 func newAbuseIPDBReporter(
 	enabled bool,
@@ -402,6 +413,52 @@ func (r *abuseIPDBReporter) cleanup() {
 			"removed":   removed,
 			"remaining": len(r.ips),
 		}).Debug("AbuseIPDB state cleanup completed")
+	}
+}
+
+// TTL-aware cache for a host key
+func newHostKeyCache(ttl, cleanupEvery time.Duration) *hostKeyCache {
+	c := &hostKeyCache{
+		keys:          make(map[string]cachedHostKey),
+		ttl:           ttl,
+		cleanupEvery:  cleanupEvery,
+	}
+
+	go c.cleanupLoop()
+
+	return c
+}
+
+// Host key Cache cleanup
+func (c *hostKeyCache) cleanupLoop() {
+	ticker := time.NewTicker(c.cleanupEvery)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		c.cleanup()
+	}
+}
+
+func (c *hostKeyCache) cleanup() {
+	now := time.Now()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	removed := 0
+
+	for key, cached := range c.keys {
+		if now.Sub(cached.lastUsed) > c.ttl {
+			delete(c.keys, key)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		logger.WithFields(logrus.Fields{
+			"removed":   removed,
+			"remaining": len(c.keys),
+		}).Debug("SSH host key cache cleanup completed")
 	}
 }
 
@@ -672,15 +729,18 @@ func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
 	cacheKey := host + ":" + keyType
 
 	// Fast path: key already cached.
-	hostKeys.mu.RLock()
-	signer, ok := hostKeys.keys[cacheKey]
-	hostKeys.mu.RUnlock()
+	hostKeys.mu.Lock()
+	if cached, ok := hostKeys.keys[cacheKey]; ok {
+		cached.lastUsed = time.Now()
+		hostKeys.keys[cacheKey] = cached
 
-	if ok {
-		return signer, nil
+		hostKeys.mu.Unlock()
+		return cached.signer, nil
 	}
 
-	// Key doesn't exist yet. Generate it.
+	hostKeys.mu.Unlock()
+
+	// Key doesn't exist yet. Generate it without holding the cache lock.
 	seed := HashToInt64(
 		[]byte(cacheKey),
 		[]byte(sshd_key_key),
@@ -689,7 +749,7 @@ func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
 	// Fine for honeypot — no security issue. Do not use for real keys.
 	rng := rand.New(rand.NewSource(seed))
 
-	var newSigner ssh.Signer
+	var signer ssh.Signer
 
 	switch keyType {
 	case "ed25519":
@@ -698,7 +758,7 @@ func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
 		if err != nil {
 			return nil, err
 		}
-		newSigner, err = ssh.NewSignerFromKey(priv)
+		signer, err = ssh.NewSignerFromKey(priv)
 		if err != nil {
 			return nil, err
 		}
@@ -709,7 +769,7 @@ func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
 		if err != nil {
 			return nil, err
 		}
-		newSigner, err = ssh.NewSignerFromKey(key)
+		signer, err = ssh.NewSignerFromKey(key)
 		if err != nil {
 			return nil, err
 		}
@@ -723,14 +783,20 @@ func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
 
 	// Another connection may have generated the same key while we were doing the expensive key generation.
 	if existing, ok := hostKeys.keys[cacheKey]; ok {
+		existing.lastUsed = time.Now()
+		hostKeys.keys[cacheKey] = existing
+
 		hostKeys.mu.Unlock()
-		return existing, nil
+		return existing.signer, nil
 	}
 
-	hostKeys.keys[cacheKey] = newSigner
+	hostKeys.keys[cacheKey] = cachedHostKey{
+		signer:   signer,
+		lastUsed: time.Now(),
+	}
 	hostKeys.mu.Unlock()
 
-	return newSigner, nil
+	return signer, nil
 }
 
 var serverProfiles = []serverProfile{
