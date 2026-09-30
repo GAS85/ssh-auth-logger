@@ -2135,7 +2135,7 @@ func TestAbuseIPDBCollectsHashedPasswordInsteadOfClear(t *testing.T) {
 		t.Fatalf("passwords = %#v, want exactly one hashed entry", state.passwords)
 	}
 
-	wantHash := sha1Hex("secret")
+	wantHash := sha1Hex("secret")[:8]
 
 	if state.passwords[0] != wantHash {
 		t.Fatalf("password = %q, want SHA-1 hash %q", state.passwords[0], wantHash)
@@ -2366,8 +2366,8 @@ func TestAbuseIPDBReportSendsHashedPasswordNotCleartext(t *testing.T) {
 		t.Fatalf("comment leaked cleartext password: %q", comment)
 	}
 
-	if !strings.Contains(comment, "passwords_sha1=") {
-		t.Fatalf("comment missing passwords_sha1 field: %q", comment)
+	if !strings.Contains(comment, "passwords sha1 prefix=") {
+		t.Fatalf("comment missing passwords sha1 prefix field: %q", comment)
 	}
 
 	if !strings.Contains(comment, wantHash) {

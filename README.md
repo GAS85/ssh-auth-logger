@@ -39,6 +39,12 @@ ssh-auth-logger uses HMAC to hash the destination IP address and a key in order 
 
 Optionally ssh-auth-logger will report IPs to the [AbuseIPDB](https://www.abuseipdb.com).
 
+Example of AbuseIPDB report:
+
+```plain
+SSH authentication brute-force attempt against GAS85/ssh-auth-logger honeypot; usernames=["sysadmin" "winter" "hardy" "esuser" "root" "rr" "jumpuser"]; passwords sha1 prefix=["d033e22a" "7c4a8d09" "44d4965a" "07c536c2" "c539153b" "843cbacc" "1530df65" "d8b93126" "0a27e12d" "c8eb02c9"]
+```
+
 ### Example log entry
 
 This is normally logged on one line
@@ -149,6 +155,8 @@ services:
       #- SSHD_LOG_CLEAR_PASSWORD=true          # Log Passwords as clear text or Base64 coded
       #- SSHD_LOGS_FILTER=""                   # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product"
       #- FORCE_SSH_PROFILE=dropbear            # Force profile to use, please refer to "serverProfiles" in main.go. Possible values: dropbear, OpenSSH_7.4, OpenSSH_7.9, OpenSSH_8.2, OpenSSH_8.4, OpenSSH_9.6. THERE IS NO DEFAULT VALUE FOR IT, it is not set --> all Profiles are used.
+      #- SSHD_HOST_KEY_CACHE_TTL="24h"         # Host key cache TTL to reduce CPU load by key generation from the same host. Default 24h.
+      #- SSHD_HOST_KEY_CACHE_CLEANUP="1h"      # Cache cleanup interval. Default 1h.
 
       # Telnet Part
 

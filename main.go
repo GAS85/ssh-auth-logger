@@ -58,6 +58,9 @@ var (
 		"product":                appName,
 	}
 
+	hostKeyCacheTTL     time.Duration
+	hostKeyCacheCleanup time.Duration
+
 	abuseIPDBEnabled              bool
 	abuseIPDBAPIKey               string
 	abuseIPDBAttempts             int
@@ -86,6 +89,21 @@ type rateLimitedConn struct {
 // Currently state is not shared between connections multiple attackers can "reset” delays by opening new connections
 type authState struct {
 	attempts int
+}
+
+// hostKeyCache caches generated SSH host keys.
+// Keys are stable for the lifetime of the process.
+type cachedHostKey struct {
+	signer   ssh.Signer
+	lastUsed time.Time
+}
+
+type hostKeyCache struct {
+	mu   sync.RWMutex
+	keys map[string]cachedHostKey
+
+	ttl          time.Duration
+	cleanupEvery time.Duration
 }
 
 // Create profile to match banner and Server Version
@@ -141,6 +159,8 @@ func (r *abuseIPDBReporter) categoriesFor(protocol string) string {
 }
 
 var abuseReporter *abuseIPDBReporter
+
+var hostKeys *hostKeyCache
 
 func newAbuseIPDBReporter(
 	enabled bool,
@@ -293,7 +313,7 @@ func (r *abuseIPDBReporter) report(
 	if (r.reportClearPassword || r.reportHashedPassword) && len(passwords) > 0 {
 		field := "passwords"
 		if r.reportHashedPassword {
-			field = "passwords_sha1"
+			field = "passwords sha1 prefix"
 		}
 		comment += fmt.Sprintf(
 			"; %s=%q",
@@ -387,6 +407,52 @@ func (r *abuseIPDBReporter) cleanup() {
 			"removed":   removed,
 			"remaining": len(r.ips),
 		}).Debug("AbuseIPDB state cleanup completed")
+	}
+}
+
+// TTL-aware cache for a host key
+func newHostKeyCache(ttl, cleanupEvery time.Duration) *hostKeyCache {
+	c := &hostKeyCache{
+		keys:         make(map[string]cachedHostKey),
+		ttl:          ttl,
+		cleanupEvery: cleanupEvery,
+	}
+
+	go c.cleanupLoop()
+
+	return c
+}
+
+// Host key Cache cleanup
+func (c *hostKeyCache) cleanupLoop() {
+	ticker := time.NewTicker(c.cleanupEvery)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		c.cleanup()
+	}
+}
+
+func (c *hostKeyCache) cleanup() {
+	now := time.Now()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	removed := 0
+
+	for key, cached := range c.keys {
+		if now.Sub(cached.lastUsed) > c.ttl {
+			delete(c.keys, key)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		logger.WithFields(logrus.Fields{
+			"removed":   removed,
+			"remaining": len(c.keys),
+		}).Debug("SSH host key cache cleanup completed")
 	}
 }
 
@@ -654,28 +720,77 @@ func getHost(addr string) string {
 }
 
 func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
-	seed := HashToInt64([]byte(host+":"+keyType), []byte(sshd_key_key))
+	cacheKey := host + ":" + keyType
+
+	// Fast path: key already cached.
+	hostKeys.mu.Lock()
+	if cached, ok := hostKeys.keys[cacheKey]; ok {
+		cached.lastUsed = time.Now()
+		hostKeys.keys[cacheKey] = cached
+
+		hostKeys.mu.Unlock()
+		return cached.signer, nil
+	}
+
+	hostKeys.mu.Unlock()
+
+	// Key doesn't exist yet. Generate it without holding the cache lock.
+	seed := HashToInt64(
+		[]byte(cacheKey),
+		[]byte(sshd_key_key),
+	)
+
 	// Fine for honeypot — no security issue. Do not use for real keys.
 	rng := rand.New(rand.NewSource(seed))
 
+	var signer ssh.Signer
+
 	switch keyType {
 	case "ed25519":
+		// Using rng heir is cheaper as crypto/rand, as honeypot it is ok
 		_, priv, err := ed25519.GenerateKey(rng)
 		if err != nil {
 			return nil, err
 		}
-		return ssh.NewSignerFromKey(priv)
+		signer, err = ssh.NewSignerFromKey(priv)
+		if err != nil {
+			return nil, err
+		}
 
 	case "rsa":
+		// Using rng heir is cheaper as crypto/rand, as honeypot it is ok
 		key, err := rsa.GenerateKey(rng, rsaBits)
 		if err != nil {
 			return nil, err
 		}
-		return ssh.NewSignerFromKey(key)
+		signer, err = ssh.NewSignerFromKey(key)
+		if err != nil {
+			return nil, err
+		}
 
 	default:
 		return nil, errors.New("unsupported host key type")
 	}
+
+	// Store the generated signer.
+	hostKeys.mu.Lock()
+
+	// Another connection may have generated the same key while we were doing the expensive key generation.
+	if existing, ok := hostKeys.keys[cacheKey]; ok {
+		existing.lastUsed = time.Now()
+		hostKeys.keys[cacheKey] = existing
+
+		hostKeys.mu.Unlock()
+		return existing.signer, nil
+	}
+
+	hostKeys.keys[cacheKey] = cachedHostKey{
+		signer:   signer,
+		lastUsed: time.Now(),
+	}
+	hostKeys.mu.Unlock()
+
+	return signer, nil
 }
 
 var serverProfiles = []serverProfile{
@@ -1126,6 +1241,25 @@ func init() {
 	// Comma-separated list of allowed fields, "" means all, " " means none
 	logsEnv := getEnvWithDefault("SSHD_LOGS_FILTER", "")
 
+	// Configure Host key cache TTL
+	hostKeyCacheTTLStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_TTL", "24h")
+	hostKeyCacheTTL, err := time.ParseDuration(hostKeyCacheTTLStr)
+	if err != nil || hostKeyCacheTTL <= 0 {
+		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_TTL")
+	}
+
+	// Configure cache cleanup interval
+	hostKeyCacheCleanupStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_CLEANUP", "1h")
+	hostKeyCacheCleanup, err := time.ParseDuration(hostKeyCacheCleanupStr)
+	if err != nil || hostKeyCacheCleanup <= 0 {
+		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_CLEANUP")
+	}
+
+	hostKeys = newHostKeyCache(
+		hostKeyCacheTTL,
+		hostKeyCacheCleanup,
+	)
+
 	// AbuseIPDB configuration
 	abuseIPDBEnabledStr := getEnvWithDefault("ABUSEIPDB_ENABLED", "false")
 	abuseIPDBEnabled = abuseIPDBEnabledStr == "1" || abuseIPDBEnabledStr == "true" || abuseIPDBEnabledStr == "yes"
@@ -1194,19 +1328,21 @@ func init() {
 
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
-		"Version":                   version,
-		"SSHD_BIND":                 sshd_bind,
-		"SSHD_KEY_KEY":              sshd_key_key,
-		"SSHD_RATE":                 rate,
-		"SSHD_MAX_AUTH_TRIES":       maxAuthTries,
-		"SSHD_RSA_BITS":             rsaBitsStr,
-		"SSHD_PROFILE_SCOPE":        profileScope,
-		"SSHD_SEND_BANNER":          sendBanner,
-		"SSHD_LOG_CLEAR_PASSWORD":   logClearPassword,
-		"SSHD_LOGS_FILTER":          logsEnv,
-		"TELNET_BIND":               telnetBind,
-		"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
-		"TELNET_RATE":               telnetRate,
+		"Version":                     version,
+		"SSHD_BIND":                   sshd_bind,
+		"SSHD_KEY_KEY":                sshd_key_key,
+		"SSHD_RATE":                   rate,
+		"SSHD_MAX_AUTH_TRIES":         maxAuthTries,
+		"SSHD_RSA_BITS":               rsaBitsStr,
+		"SSHD_PROFILE_SCOPE":          profileScope,
+		"SSHD_SEND_BANNER":            sendBanner,
+		"SSHD_LOG_CLEAR_PASSWORD":     logClearPassword,
+		"SSHD_LOGS_FILTER":            logsEnv,
+		"SSHD_HOST_KEY_CACHE_TTL":     hostKeyCacheTTL.String(),
+		"SSHD_HOST_KEY_CACHE_CLEANUP": hostKeyCacheCleanup.String(),
+		"TELNET_BIND":                 telnetBind,
+		"TELNET_LOG_CLEAR_PASSWORD":   telnetLogClearPassword,
+		"TELNET_RATE":                 telnetRate,
 	}
 	// Only show AbuseIPDB configuration when enabled.
 	if abuseIPDBEnabled {
