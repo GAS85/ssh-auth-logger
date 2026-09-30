@@ -299,8 +299,9 @@ func (r *abuseIPDBReporter) report(
 	passwords []string,
 ) {
 	comment := fmt.Sprintf(
-		"%s authentication brute-force attempt against GAS85/ssh-auth-logger honeypot",
+		"%s authentication brute-force attempt against GAS85/ssh-auth-logger honeypot from %s",
 		protocol,
+		ip,
 	)
 
 	if r.reportClearUsername && len(usernames) > 0 {
