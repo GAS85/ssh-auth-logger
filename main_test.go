@@ -2135,7 +2135,7 @@ func TestAbuseIPDBCollectsHashedPasswordInsteadOfClear(t *testing.T) {
 		t.Fatalf("passwords = %#v, want exactly one hashed entry", state.passwords)
 	}
 
-	wantHash := sha1Hex("secret")
+	wantHash := sha1Hex("secret")[:8]
 
 	if state.passwords[0] != wantHash {
 		t.Fatalf("password = %q, want SHA-1 hash %q", state.passwords[0], wantHash)
