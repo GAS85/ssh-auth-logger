@@ -313,7 +313,7 @@ func (r *abuseIPDBReporter) report(
 	if (r.reportClearPassword || r.reportHashedPassword) && len(passwords) > 0 {
 		field := "passwords"
 		if r.reportHashedPassword {
-			field = "passwords_sha1"
+			field = "passwords sha1 prefix"
 		}
 		comment += fmt.Sprintf(
 			"; %s=%q",
