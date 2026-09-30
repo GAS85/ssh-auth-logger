@@ -88,6 +88,19 @@ type authState struct {
 	attempts int
 }
 
+// hostKeyCache caches generated SSH host keys.
+// Keys are stable for the lifetime of the process.
+type hostKeyCache struct {
+	mu   sync.RWMutex
+	keys map[string]ssh.Signer
+}
+
+func newHostKeyCache() *hostKeyCache {
+	return &hostKeyCache{
+		keys: make(map[string]ssh.Signer),
+	}
+}
+
 // Create profile to match banner and Server Version
 type serverProfile struct {
 	ServerVersion string
@@ -141,6 +154,8 @@ func (r *abuseIPDBReporter) categoriesFor(protocol string) string {
 }
 
 var abuseReporter *abuseIPDBReporter
+
+var hostKeys = newHostKeyCache()
 
 func newAbuseIPDBReporter(
 	enabled bool,
@@ -654,28 +669,68 @@ func getHost(addr string) string {
 }
 
 func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
-	seed := HashToInt64([]byte(host+":"+keyType), []byte(sshd_key_key))
+	cacheKey := host + ":" + keyType
+
+	// Fast path: key already cached.
+	hostKeys.mu.RLock()
+	signer, ok := hostKeys.keys[cacheKey]
+	hostKeys.mu.RUnlock()
+
+	if ok {
+		return signer, nil
+	}
+
+	// Key doesn't exist yet. Generate it.
+	seed := HashToInt64(
+		[]byte(cacheKey),
+		[]byte(sshd_key_key),
+	)
+
 	// Fine for honeypot — no security issue. Do not use for real keys.
 	rng := rand.New(rand.NewSource(seed))
 
+	var newSigner ssh.Signer
+
 	switch keyType {
 	case "ed25519":
+		// Using rng heir is cheaper as crypto/rand, as honeypot it is ok
 		_, priv, err := ed25519.GenerateKey(rng)
 		if err != nil {
 			return nil, err
 		}
-		return ssh.NewSignerFromKey(priv)
+		newSigner, err = ssh.NewSignerFromKey(priv)
+		if err != nil {
+			return nil, err
+		}
 
 	case "rsa":
+		// Using rng heir is cheaper as crypto/rand, as honeypot it is ok
 		key, err := rsa.GenerateKey(rng, rsaBits)
 		if err != nil {
 			return nil, err
 		}
-		return ssh.NewSignerFromKey(key)
+		newSigner, err = ssh.NewSignerFromKey(key)
+		if err != nil {
+			return nil, err
+		}
 
 	default:
 		return nil, errors.New("unsupported host key type")
 	}
+
+	// Store the generated signer.
+	hostKeys.mu.Lock()
+
+	// Another connection may have generated the same key while we were doing the expensive key generation.
+	if existing, ok := hostKeys.keys[cacheKey]; ok {
+		hostKeys.mu.Unlock()
+		return existing, nil
+	}
+
+	hostKeys.keys[cacheKey] = newSigner
+	hostKeys.mu.Unlock()
+
+	return newSigner, nil
 }
 
 var serverProfiles = []serverProfile{
