@@ -194,7 +194,9 @@ services:
 
 ### Abuse Reporting
 
-Currently we do support [AbuseIPDB](https://www.abuseipdb.com/) and [Dshield](https://www.dshield.org/) reporting.
+Currently we do support [AbuseIPDB](https://www.abuseipdb.com/), [OTX](https://otx.alienvault.com/) and [Dshield](https://www.dshield.org/) reporting.
+
+[blocklist](https://www.blocklist.de/) support is planned.
 
 It you would like to enable reporting, please add following config:
 
@@ -217,8 +219,9 @@ This part is optional, you can skip it and use defaults.
 ```yaml
       # AbuseIPDB Part
 
-      - ABUSEIPDB_ENABLED=false               # Enable Abuse IP DB reporting
-      - ABUSEIPDB_API_KEY=someKey             # Your Abuse IP DB API Key. Get one after registration: https://www.abuseipdb.com/account/api/keys
+      - ABUSEIPDB_ENABLED=false   # Enable Abuse IP DB reporting
+      - ABUSEIPDB_API_KEY=someKey # Your Abuse IP DB API Key. Get one after registration: https://www.abuseipdb.com/account/api/keys
+
       # Optional values
       - ABUSEIPDB_SSH_CATEGORIES=18,22        # SSH Report categories, please refer to https://www.abuseipdb.com/categories
       - ABUSEIPDB_TELNET_CATEGORIES=14,18,23  # Telnet Report categories, please refer to https://www.abuseipdb.com/categories
@@ -232,9 +235,10 @@ This part is optional, you can skip it and use defaults.
 ```yaml
       # DShield Part
 
-      - DSHIELD_ENABLED=false                # Enable DShield reporting
-      - DSHIELD_USERID=123456789             # User ID, get it after registration: https://www.dshield.org/myaccount.html
-      - DSHIELD_API_KEY=someKey              # Your API Key. Get one after registration: https://www.dshield.org/myaccount.html
+      - DSHIELD_ENABLED=false     # Enable DShield reporting
+      - DSHIELD_USERID=123456789  # User ID, get it after registration: https://www.dshield.org/myaccount.html
+      - DSHIELD_API_KEY=someKey   # Your API Key. Get one after registration: https://www.dshield.org/myaccount.html
+
       # Optional values
       - DSHIELD_BATCH_SIZE=50                # Report queues the collected attempts and submits the batch once 
       - DSHIELD_BATCH_INTERVAL=10m           # Makes sure queued entries do not wait indefinitely for the batch to fill up.
@@ -242,6 +246,27 @@ This part is optional, you can skip it and use defaults.
       - DSHIELD_REPORT_CLEAR_USERNAME=true   # Report User names to DShield in a clear text
       - DSHIELD_REPORT_CLEAR_PASSWORD=true   # Report clear Passwords to DShield. DShield statistics are built from usernames / passwords, so unlike AbuseIPDB (public per-IP comments) clear credentials are on by default.
       - DSHIELD_REPORT_HASHED_PASSWORD=false # Report hashed Passwords to DShield.
+```
+
+#### OTX Reporting part
+
+```yaml
+      # OTX Part
+
+      - OTX_ENABLED=false     # Enable DShield reporting
+      - OTX_API_KEY=someKey   # Your API Key. Get one after registration: https://otx.alienvault.com/settings
+      - OTX_PULSE_ID=pulse ID # The pulse ID is logged on creation.
+                              # Set OTX_PULSE_ID to keep appending to it after a restart. 
+                              # Without it, each restart creates a new pulse.
+      - OTX_PULSE_NAME="GAS85/ssh-auth-logger honeypot SSH/Telnet brute-force sources"
+
+      # Optional values
+      - OTX_BATCH_SIZE=50                           # Report queues the collected attempts and submits the batch once 
+      - OTX_BATCH_INTERVAL=1h                       # Makes sure queued entries do not wait indefinitely for the batch to fill up.
+      - OTX_TLP=white                               # Accepts white, green, amber or red. Red more about in: https://www.cisa.gov/news-events/news/traffic-light-protocol-tlp-definitions-and-usage
+      - OTX_PUBLIC=true                             # OTX_TLP set to amber and red need "false"
+      - OTX_TAGS="honeypot,ssh,telnet,brute-force"  # Tags as comma separated list
+      - OTX_INDICATOR_ROLE=bruteforce               # Role name. An unknown role could make OTX reject every batch.
 ```
 
 ## Build local
