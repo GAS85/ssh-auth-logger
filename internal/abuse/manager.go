@@ -106,9 +106,14 @@ type Manager struct {
 	stateExpiry   time.Duration
 
 	ips map[string]*abuseIPState
+
+	done     chan struct{} // closed by Stop
+	loopDone chan struct{} // closed when cleanupLoop has exited (nil if no loop was started)
+	stopOnce sync.Once
 }
 
-func newManager(
+// NewManager creates a Manager reporting to the given backends. Most callers should use Setup, which builds the backends from the environment. NewManager is exported so tests can inject their own Backend.
+func NewManager(
 	backends []Backend,
 	attemptsLimit int,
 	reportEvery time.Duration,
@@ -122,20 +127,37 @@ func newManager(
 		cleanupEvery:  cleanupEvery,
 		stateExpiry:   stateExpiry,
 		ips:           make(map[string]*abuseIPState),
+		done:          make(chan struct{}),
 	}
 
 	if len(backends) > 0 {
+		m.loopDone = make(chan struct{})
 		go m.cleanupLoop()
 	}
 
 	return m
 }
 
+// Stop ends the background cleanup goroutine and waits for it to exit.
+// The Manager normally lives for the whole process, so calling Stop is optional; it exists for graceful shutdown and for tests. RecordFailure keeps working afterwards.
+func (m *Manager) Stop() {
+	if m == nil {
+		return
+	}
+	m.stopOnce.Do(func() {
+		close(m.done)
+		if m.loopDone != nil {
+			<-m.loopDone
+		}
+	})
+}
+
 // RecordFailure records a failed authentication attempt.
 // Once the configured number of attempts has been reached, the IP is reported asynchronously to every enabled backend.
 // Returns true if this call caused a report to be scheduled.
 func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
-	if len(m.backends) == 0 {
+	// A nil Manager (Setup never called) is a harmless no-op.
+	if m == nil || len(m.backends) == 0 {
 		return false
 	}
 
@@ -223,11 +245,18 @@ func addCredential(list []Credential, c Credential) []Credential {
 
 // cleanupLoop periodically purges state of IPs that went quiet.
 func (m *Manager) cleanupLoop() {
+	defer close(m.loopDone)
+
 	ticker := time.NewTicker(m.cleanupEvery)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		m.cleanup()
+	for {
+		select {
+		case <-ticker.C:
+			m.cleanup()
+		case <-m.done:
+			return
+		}
 	}
 }
 
@@ -305,7 +334,7 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 		}
 	}
 
-	manager := newManager(
+	manager := NewManager(
 		backends,
 		abuseAttempts,
 		abuseReportInterval,

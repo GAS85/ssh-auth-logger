@@ -66,6 +66,10 @@ type dshieldBackend struct {
 
 	mu    sync.Mutex
 	batch []dshieldLogEntry
+
+	done     chan struct{} // closed by stop
+	loopDone chan struct{} // closed when flushLoop has exited
+	stopOnce sync.Once
 }
 
 // newDShieldFromEnv builds the DShield backend from DSHIELD_* variables. Returns (nil, nil) if DSHIELD_ENABLED is not set.
@@ -121,6 +125,8 @@ func newDShieldFromEnv() (Backend, logrus.Fields) {
 		b.endpoint = dshieldDebugSubmitURL
 	}
 
+	b.done = make(chan struct{})
+	b.loopDone = make(chan struct{})
 	go b.flushLoop()
 
 	return b, logrus.Fields{
@@ -179,12 +185,33 @@ func (b *dshieldBackend) Report(rep Report) {
 
 // flushLoop makes sure queued entries do not wait indefinitely for the batch to fill up.
 func (b *dshieldBackend) flushLoop() {
+	if b.loopDone != nil {
+		defer close(b.loopDone)
+	}
+
 	ticker := time.NewTicker(b.flushEvery)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		b.flush()
+	for {
+		select {
+		case <-ticker.C:
+			b.flush()
+		case <-b.done: // nil channel (no stop wired up) blocks forever, i.e. runs until process exit
+			return
+		}
 	}
+}
+
+// stop ends flushLoop and waits for it to exit. Queued entries are not flushed.
+func (b *dshieldBackend) stop() {
+	b.stopOnce.Do(func() {
+		if b.done != nil {
+			close(b.done)
+		}
+		if b.loopDone != nil {
+			<-b.loopDone
+		}
+	})
 }
 
 // flush takes everything queued and submits it. On temporary failure the entries are put back in the queue.
@@ -228,13 +255,17 @@ func (b *dshieldBackend) authHeader() (string, error) {
 	if _, err := rand.Read(nonceBytes); err != nil {
 		return "", err
 	}
-	nonce := base64.StdEncoding.EncodeToString(nonceBytes)
 
+	return b.authHeaderWithNonce(base64.StdEncoding.EncodeToString(nonceBytes)), nil
+}
+
+// authHeaderWithNonce is split out of authHeader so the signature can be verified against a known-answer vector.
+func (b *dshieldBackend) authHeaderWithNonce(nonce string) string {
 	mac := hmac.New(sha256.New, []byte(nonce+b.userID))
 	mac.Write([]byte(b.apiKey))
 	digest := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
-	return fmt.Sprintf("ISC-HMAC-SHA256 Credentials=%s Userid=%s Nonce=%s", digest, b.userID, nonce), nil
+	return fmt.Sprintf("ISC-HMAC-SHA256 Credentials=%s Userid=%s Nonce=%s", digest, b.userID, nonce)
 }
 
 // submit sends one batch. The returned bool tells whether a retry later makes sense (network error / 5xx / 429) or not (rejected request, e.g. bad credentials).

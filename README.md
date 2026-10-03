@@ -194,7 +194,7 @@ services:
 
 ### Abuse Reporting
 
-Currently we do support [AbuseIPDB](https://www.abuseipdb.com/) and [Dshield](https://www.dshield.org/) reporting. [Crowdsec](https://www.crowdsec.net/) and [OTX](https://otx.alienvault.com/) support planned.
+Currently we do support [AbuseIPDB](https://www.abuseipdb.com/) and [Dshield](https://www.dshield.org/) reporting.
 
 It you would like to enable reporting, please add following config:
 
