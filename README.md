@@ -128,7 +128,7 @@ ssh user@localhost -p 2222 -o StrictHostKeyChecking=no -o PubkeyAuthentication=n
 
 ### Run with Docker compose
 
-Docker compose example:
+Docker compose example with variables:
 
 ```yaml
 # Create isolated network
@@ -163,6 +163,49 @@ services:
       #- TELNET_BIND=:2323                     # Port and interface telnetd to listen
       #- TELNET_LOG_CLEAR_PASSWORD=true        # Log Passwords as clear text or Base64 coded
       #- TELNET_RATE=100                       # bits per second, emulate very slow connection
+    volumes:
+      # Mount log file if needed
+      - /var/docker/ssh-auth-logger/log:/var/log
+    ports:
+     - 2222:2222 # SSH Auth Logger
+     - 2323:2323 # SSH Auth Logger Telnet
+    networks:
+      # Use isolated docker network, so that other containers will be not reachable from it
+      - isolated_net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 100M
+    # Health check is build in, so you do not needed it. Use only if you will set different test or parameters.
+    # healthcheck:
+       # Will test if port application is up AND log file was not vanished by host machine log rotate
+    #   test: nc -zv localhost:$$SSHD_BIND && test -s /var/log/ssh-auth-logger.log || exit 1
+    #   interval: 5m00s
+    #   timeout: 5s
+    #   retries: 2
+    #   start_period: 5s
+    logging:
+      driver: json-file
+      options:
+          max-size: 10m
+```
+
+Docker compose example with [`env`](.env_example) file:
+
+```yaml
+# Create isolated network
+networks:
+  isolated_net:
+    driver: bridge
+
+services:
+  ssh-auth-logger:
+    image: gas85/ssh-auth-logger:latest
+    container_name: ssh-auth-logger
+    env_file:
+      - .env
     volumes:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log
