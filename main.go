@@ -1,37 +1,30 @@
 package main
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rsa"
-	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
-	"fmt"
-	"io"
 	"math/rand"
 	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
+	"github.com/GAS85/ssh-auth-logger/internal/abuse"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
 const appName = "ssh-auth-logger"
 
-// const abuseIPDBCleanupInterval = 30 * time.Minute
-// const abuseIPDBStateExpiry = 2 * time.Hour
+// const abuseCleanupInterval = 30 * time.Minute
+// const abuseStateExpiry = 2 * time.Hour
 
 var (
 	version = "dev"
@@ -60,22 +53,7 @@ var (
 
 	hostKeyCacheTTL     time.Duration
 	hostKeyCacheCleanup time.Duration
-
-	abuseIPDBEnabled              bool
-	abuseIPDBAPIKey               string
-	abuseIPDBAttempts             int
-	abuseIPDBReportInterval       time.Duration
-	abuseIPDBSSHCategories        string // categories used when reporting SSH attempts
-	abuseIPDBTelnetCategories     string // categories used when reporting Telnet attempts
-	abuseIPDBCleanupInterval      time.Duration
-	abuseIPDBStateExpiry          time.Duration
-	abuseIPDBReportClearUsername  bool
-	abuseIPDBReportClearPassword  bool
-	abuseIPDBReportHashedPassword bool
 )
-
-// Maximum comment length (bytes) https://www.abuseipdb.com/api.html
-const abuseIPDBMaxCommentLen = 1024
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
 type rateLimitedConn struct {
@@ -116,300 +94,10 @@ type serverProfile struct {
 	Macs          []string
 }
 
-// abuseIPState contains reporting state for one source IP.
-type abuseIPState struct {
-	attempts     int
-	lastReported time.Time
-	lastSeen     time.Time
-	// Collect usernames and passwords for report
-	usernames []string
-	passwords []string
-}
-
-// abuseIPDBReporter tracks authentication failures per source IP and reports abusive IPs to AbuseIPDB once the configured threshold has been reached.
-type abuseIPDBReporter struct {
-	mu sync.Mutex
-
-	apiKey        string
-	enabled       bool
-	attemptsLimit int
-	reportEvery   time.Duration
-
-	sshCategories    string
-	telnetCategories string
-
-	cleanupEvery time.Duration
-	stateExpiry  time.Duration
-
-	reportClearUsername  bool
-	reportClearPassword  bool
-	reportHashedPassword bool
-
-	httpClient *http.Client
-
-	ips map[string]*abuseIPState
-}
-
-// categoriesFor returns the AbuseIPDB category list to use for the given protocol
-func (r *abuseIPDBReporter) categoriesFor(protocol string) string {
-	if strings.EqualFold(protocol, "Telnet") {
-		return r.telnetCategories
-	}
-	return r.sshCategories
-}
-
-var abuseReporter *abuseIPDBReporter
-
 var hostKeys *hostKeyCache
 
-func newAbuseIPDBReporter(
-	enabled bool,
-	apiKey string,
-	attemptsLimit int,
-	reportEvery time.Duration,
-	sshCategories string,
-	telnetCategories string,
-	cleanupEvery time.Duration,
-	stateExpiry time.Duration,
-	reportClearUsername bool,
-	reportClearPassword bool,
-	reportHashedPassword bool,
-) *abuseIPDBReporter {
-
-	r := &abuseIPDBReporter{
-		enabled:       enabled,
-		apiKey:        apiKey,
-		attemptsLimit: attemptsLimit,
-		reportEvery:   reportEvery,
-
-		sshCategories:    sshCategories,
-		telnetCategories: telnetCategories,
-
-		cleanupEvery: cleanupEvery,
-		stateExpiry:  stateExpiry,
-
-		reportClearUsername: reportClearUsername,
-		// reportHashedPassword takes precedence over reportClearPassword. If both are set, cleartext passwords are never collected or sent
-		reportClearPassword:  reportClearPassword && !reportHashedPassword,
-		reportHashedPassword: reportHashedPassword,
-
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-
-		ips: make(map[string]*abuseIPState),
-	}
-
-	if enabled {
-		go r.cleanupLoop()
-	}
-
-	return r
-}
-
-// RecordFailure records a failed authentication attempt.
-// Once the configured number of attempts has been reached, the IP is reported asynchronously to AbuseIPDB.
-// Returns true if this call caused a report to be scheduled.
-func (r *abuseIPDBReporter) RecordFailure(ip, protocol, username, password string) bool {
-	if !r.enabled {
-		return false
-	}
-
-	if net.ParseIP(ip) == nil {
-		logger.WithField("ip", ip).Warn("AbuseIPDB: invalid IP address")
-		return false
-	}
-
-	now := time.Now()
-
-	r.mu.Lock()
-	// defer r.mu.Unlock()
-
-	state, exists := r.ips[ip]
-	if !exists {
-		state = &abuseIPState{}
-		r.ips[ip] = state
-	}
-
-	state.lastSeen = now
-
-	// Collect usernames only if explicitly enabled.
-	if r.reportClearUsername && username != "" {
-		state.usernames = appendUnique(state.usernames, username)
-	}
-	// Collect credentials or SHA-1 hash only if explicitly enabled.
-	if (r.reportClearPassword || r.reportHashedPassword) && password != "" {
-		p := password
-		if r.reportHashedPassword {
-			// Cut to the first 8 Symbols, as full SHA1 is easy to revert, kind of k-anonymity model
-			p = sha1Hex(password)[:8]
-		}
-		state.passwords = appendUnique(state.passwords, p)
-	}
-
-	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
-	if !state.lastReported.IsZero() &&
-		now.Sub(state.lastReported) < r.reportEvery {
-
-		r.mu.Unlock()
-		return false
-	}
-
-	state.attempts++
-
-	if state.attempts < r.attemptsLimit {
-		r.mu.Unlock()
-		return false
-	}
-
-	// Copy data before releasing the mutex.
-	usernames := append([]string(nil), state.usernames...)
-	passwords := append([]string(nil), state.passwords...)
-
-	// Reset the collected credentials for the next reporting window.
-	state.usernames = nil
-	state.passwords = nil
-
-	// Mark the IP as reported BEFORE starting the goroutine.
-	// If several authentication attempts arrive concurrently, only one of them should schedule a report.
-	state.lastReported = now
-	state.attempts = 0
-
-	r.mu.Unlock()
-
-	logger.WithFields(logrus.Fields{
-		"ip":       ip,
-		"protocol": protocol,
-		// "username":   username,
-		"attempts": r.attemptsLimit,
-		// "cooldown":   r.reportEvery.String(),
-	}).Infof("AbuseIPDB: report threshold reached for %s. Report IP.", ip)
-
-	go r.report(ip, protocol, usernames, passwords)
-
-	return true
-}
-
-// report sends the actual AbuseIPDB request.
-// This is deliberately asynchronous so an external API problem cannot delay or interfere with SSH/Telnet authentication handling.
-func (r *abuseIPDBReporter) report(
-	ip string,
-	protocol string,
-	usernames []string,
-	passwords []string,
-) {
-	comment := fmt.Sprintf(
-		"%s authentication brute-force attempt against GAS85/ssh-auth-logger honeypot from %s",
-		protocol,
-		ip,
-	)
-
-	if r.reportClearUsername && len(usernames) > 0 {
-		comment += fmt.Sprintf(
-			"; usernames=%q",
-			usernames,
-		)
-	}
-
-	if (r.reportClearPassword || r.reportHashedPassword) && len(passwords) > 0 {
-		field := "passwords"
-		if r.reportHashedPassword {
-			field = "passwords sha1 prefix"
-		}
-		comment += fmt.Sprintf(
-			"; %s=%q",
-			field,
-			passwords,
-		)
-	}
-
-	comment = truncateUTF8(comment, abuseIPDBMaxCommentLen)
-
-	form := url.Values{}
-	form.Set("ip", ip)
-	form.Set("categories", r.categoriesFor(protocol))
-	form.Set("comment", comment)
-	form.Set("timestamp", time.Now().UTC().Format(time.RFC3339))
-
-	req, err := http.NewRequest(
-		http.MethodPost,
-		"https://api.abuseipdb.com/api/v2/report",
-		bytes.NewBufferString(form.Encode()),
-	)
-	if err != nil {
-		logger.WithError(err).
-			WithField("ip", ip).
-			Error("AbuseIPDB: failed to create request")
-		return
-	}
-
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Key", r.apiKey)
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		logger.WithError(err).
-			WithField("ip", ip).
-			Error("AbuseIPDB: request failed")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Read a bounded amount of the body and put the actual rejection reason (bad category, invalid IP, rate limit, etc.) in the JSON error response, which is otherwise thrown away.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-
-		logger.WithFields(logrus.Fields{
-			"ip":       ip,
-			"status":   resp.Status,
-			"protocol": protocol,
-			"body":     string(body),
-		}).Warnf("AbuseIPDB: report rejected for %s", ip)
-
-		return
-	}
-
-	logger.WithFields(logrus.Fields{
-		"ip":       ip,
-		"protocol": protocol,
-	}).Infof("AbuseIPDB: IP %s reported", ip)
-}
-
-// AbuseIPDB cleanup the state
-func (r *abuseIPDBReporter) cleanupLoop() {
-	ticker := time.NewTicker(r.cleanupEvery)
-
-	defer ticker.Stop()
-
-	for range ticker.C {
-		r.cleanup()
-	}
-}
-
-// cleanup removes IPs that have not been seen for the configured state-expiry period.
-func (r *abuseIPDBReporter) cleanup() {
-	now := time.Now()
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	removed := 0
-
-	for ip, state := range r.ips {
-		if now.Sub(state.lastSeen) > r.stateExpiry {
-			delete(r.ips, ip)
-			removed++
-		}
-	}
-
-	if removed > 0 {
-		logger.WithFields(logrus.Fields{
-			"removed":   removed,
-			"remaining": len(r.ips),
-		}).Debug("AbuseIPDB state cleanup completed")
-	}
-}
+// abuseReporter is the single entry point used by the SSH and Telnet handlers.
+var abuseReporter *abuse.Manager
 
 // TTL-aware cache for a host key
 func newHostKeyCache(ttl, cleanupEvery time.Duration) *hostKeyCache {
@@ -455,36 +143,6 @@ func (c *hostKeyCache) cleanup() {
 			"remaining": len(c.keys),
 		}).Debug("SSH host key cache cleanup completed")
 	}
-}
-
-// truncateUTF8 truncates s to at most maxBytes bytes without splitting
-// a multi-byte rune in half.
-func truncateUTF8(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	b := s[:maxBytes]
-	for len(b) > 0 && !utf8.ValidString(b) {
-		b = b[:len(b)-1]
-	}
-	return b
-}
-
-// sha1Hex returns the hex-encoded SHA-1 digest of s.
-// SHA-1 is used here only to avoid publishing cleartext credentials to a public database, not as a secure password hash
-func sha1Hex(s string) string {
-	sum := sha1.Sum([]byte(s))
-	return hex.EncodeToString(sum[:])
-}
-
-func appendUnique(values []string, value string) []string {
-	for _, existing := range values {
-		if existing == value {
-			return values
-		}
-	}
-
-	return append(values, value)
 }
 
 // resolveProfileKey determines the server-profile lookup key for a connection. With scope "remote_ip", profiles are keyed by the client's IP (so the same attacker always sees the same fake host); any other scope (the default, "host") keys by the local listener address instead, so falls back to the full remote address string if it can't be split into host:port.
@@ -1261,71 +919,13 @@ func init() {
 		hostKeyCacheCleanup,
 	)
 
-	// AbuseIPDB configuration
-	abuseIPDBEnabledStr := getEnvWithDefault("ABUSEIPDB_ENABLED", "false")
-	abuseIPDBEnabled = abuseIPDBEnabledStr == "1" || abuseIPDBEnabledStr == "true" || abuseIPDBEnabledStr == "yes"
-
-	abuseIPDBAPIKey = os.Getenv("ABUSEIPDB_API_KEY")
-
-	abuseIPDBAttemptsStr := getEnvWithDefault("ABUSEIPDB_ATTEMPTS", "10")
-	abuseIPDBAttempts, err = strconv.Atoi(abuseIPDBAttemptsStr)
-	if err != nil || abuseIPDBAttempts <= 0 {
-		logrus.Fatal("Invalid ABUSEIPDB_ATTEMPTS environment variable")
-	}
-
-	abuseIPDBReportIntervalStr := getEnvWithDefault("ABUSEIPDB_REPORT_INTERVAL", "15m") // https://www.abuseipdb.com/api.html
-	abuseIPDBReportInterval, err = time.ParseDuration(abuseIPDBReportIntervalStr)
-	if err != nil || abuseIPDBReportInterval <= 0 {
-		logrus.Fatal("Invalid ABUSEIPDB_REPORT_INTERVAL environment variable")
-	}
-
-	// 18=Brute-Force, 22=SSH
-	abuseIPDBSSHCategories = getEnvWithDefault("ABUSEIPDB_SSH_CATEGORIES", "18,22")
-	// 14=Port Scan, 18=Brute-Force, 23=IoT Targeted
-	abuseIPDBTelnetCategories = getEnvWithDefault("ABUSEIPDB_TELNET_CATEGORIES", "14,18,23")
-
-	abuseIPDBCleanupIntervalStr := getEnvWithDefault("ABUSEIPDB_CLEANUP_INTERVAL", "30m")
-	abuseIPDBCleanupInterval, err = time.ParseDuration(abuseIPDBCleanupIntervalStr)
-	if err != nil || abuseIPDBCleanupInterval <= 0 {
-		logrus.Fatal("Invalid ABUSEIPDB_CLEANUP_INTERVAL environment variable")
-	}
-
-	abuseIPDBStateExpiryStr := getEnvWithDefault("ABUSEIPDB_STATE_EXPIRY", "2h")
-	abuseIPDBStateExpiry, err = time.ParseDuration(abuseIPDBStateExpiryStr)
-	if err != nil || abuseIPDBStateExpiry <= 0 {
-		logrus.Fatal("Invalid ABUSEIPDB_STATE_EXPIRY environment variable")
-	}
-
-	if abuseIPDBEnabled && abuseIPDBAPIKey == "" {
-		logrus.Fatal(
-			"ABUSEIPDB_ENABLED is enabled but ABUSEIPDB_API_KEY is empty",
-		)
-	}
-
-	abuseIPDBReportClearUsernameStr := getEnvWithDefault("ABUSEIPDB_REPORT_CLEAR_USERNAME", "false")
-
-	abuseIPDBReportClearUsername = abuseIPDBReportClearUsernameStr == "1" || abuseIPDBReportClearUsernameStr == "true" || abuseIPDBReportClearUsernameStr == "yes"
-
-	abuseIPDBReportClearPasswordStr := getEnvWithDefault("ABUSEIPDB_REPORT_CLEAR_PASSWORD", "false")
-	abuseIPDBReportClearPassword = abuseIPDBReportClearPasswordStr == "1" || abuseIPDBReportClearPasswordStr == "true" || abuseIPDBReportClearPasswordStr == "yes"
-
-	// ABUSEIPDB_REPORT_HASHED_PASSWORD overrides ABUSEIPDB_REPORT_CLEAR_PASSWORD when enabled, SHA-1 hashes are reported instead of cleartext passwords.
-	abuseIPDBReportHashedPasswordStr := getEnvWithDefault("ABUSEIPDB_REPORT_HASHED_PASSWORD", "true")
-	abuseIPDBReportHashedPassword = abuseIPDBReportHashedPasswordStr == "1" || abuseIPDBReportHashedPasswordStr == "true" || abuseIPDBReportHashedPasswordStr == "yes"
-
-	abuseReporter = newAbuseIPDBReporter(
-		abuseIPDBEnabled,
-		abuseIPDBAPIKey,
-		abuseIPDBAttempts,
-		abuseIPDBReportInterval,
-		abuseIPDBSSHCategories,
-		abuseIPDBTelnetCategories,
-		abuseIPDBCleanupInterval,
-		abuseIPDBStateExpiry,
-		abuseIPDBReportClearUsername,
-		abuseIPDBReportClearPassword,
-		abuseIPDBReportHashedPassword,
-	)
+	// Abuse reporting: shared ABUSE_* settings plus one section per backend (AbuseIPDB, DShield, ...). See internal/abuse.
+	var abuseStartupFields logrus.Fields
+	abuseReporter, abuseStartupFields = abuse.Setup(abuse.Options{
+		Logger:    logger,
+		Getenv:    getEnvWithDefault,
+		UserAgent: appName + "/" + version,
+	})
 
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
@@ -1345,18 +945,9 @@ func init() {
 		"TELNET_LOG_CLEAR_PASSWORD":   telnetLogClearPassword,
 		"TELNET_RATE":                 telnetRate,
 	}
-	// Only show AbuseIPDB configuration when enabled.
-	if abuseIPDBEnabled {
-		startupFields["ABUSEIPDB_ENABLED"] = true
-		startupFields["ABUSEIPDB_ATTEMPTS"] = abuseIPDBAttempts
-		startupFields["ABUSEIPDB_REPORT_INTERVAL"] = abuseIPDBReportInterval.String()
-		startupFields["ABUSEIPDB_SSH_CATEGORIES"] = abuseIPDBSSHCategories
-		startupFields["ABUSEIPDB_TELNET_CATEGORIES"] = abuseIPDBTelnetCategories
-		startupFields["ABUSEIPDB_CLEANUP_INTERVAL"] = abuseIPDBCleanupInterval.String()
-		startupFields["ABUSEIPDB_STATE_EXPIRY"] = abuseIPDBStateExpiry.String()
-		startupFields["ABUSEIPDB_REPORT_CLEAR_USERNAME"] = abuseIPDBReportClearUsername
-		startupFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] = abuseReporter.reportClearPassword
-		startupFields["ABUSEIPDB_REPORT_HASHED_PASSWORD"] = abuseReporter.reportHashedPassword
+	// Only show abuse reporting configuration when at least one backend is enabled.
+	for k, v := range abuseStartupFields {
+		startupFields[k] = v
 	}
 	logrus.WithFields(startupFields).Info("Starting SSH Auth Logger")
 

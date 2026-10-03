@@ -163,20 +163,6 @@ services:
       #- TELNET_BIND=:2323                     # Port and interface telnetd to listen
       #- TELNET_LOG_CLEAR_PASSWORD=true        # Log Passwords as clear text or Base64 coded
       #- TELNET_RATE=100                       # bits per second, emulate very slow connection
-
-      # AbuseIPDB Part
-
-      #- ABUSEIPDB_ENABLED=false               # Enable Abuse IP DB reporting
-      #- ABUSEIPDB_API_KEY=someKey             # Your Abuse IP DB API Key. Get one after registration: https://www.abuseipdb.com/account/api/keys
-      #- ABUSEIPDB_ATTEMPTS=10                 # Attempts amount when IP will be reported 
-      #- ABUSEIPDB_REPORT_INTERVAL=15m         # How often shall we report the same IP. 15 minutes is a minimum. Please refer to Rate Limit in https://www.abuseipdb.com/api.html
-      #- ABUSEIPDB_SSH_CATEGORIES=18,22        # SSH Report categories, please refer to https://www.abuseipdb.com/categories
-      #- ABUSEIPDB_TELNET_CATEGORIES=14,18,23  # Telnet Report categories, please refer to https://www.abuseipdb.com/categories
-      #- ABUSEIPDB_CLEANUP_INTERVAL=30m        # Internal IP table clean up interval
-      #- ABUSEIPDB_STATE_EXPIRY=2h             # Interval when we will forget about IP's login attempts prior to report it
-      #- ABUSEIPDB_REPORT_CLEAR_USERNAME=false # Report User names to AbuseIPDB in a clear text
-      #- ABUSEIPDB_REPORT_HASHED_PASSWORD=true # Report hashed Passwords to AbuseIPDB
-      #- ABUSEIPDB_REPORT_CLEAR_PASSWORD=false # Report Passwords to AbuseIPDB in a clear text. It is strongly recommended to use ABUSEIPDB_REPORT_HASHED_PASSWORD instead. Works only when report of hashed password is disabled
     volumes:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log
@@ -204,6 +190,58 @@ services:
       driver: json-file
       options:
           max-size: 10m
+```
+
+### Abuse Reporting
+
+Currently we do support [AbuseIPDB](https://www.abuseipdb.com/) and [Dshield](https://www.dshield.org/) reporting.
+
+It you would like to enable reporting, please add following config:
+
+#### Common Abuse Reporting part
+
+This part is optional, you can skip it and use defaults.
+
+```yaml
+      # Abuse Common Setup
+      # Optional
+
+      - ABUSE_REPORT_ATTEMPTS=10   # Failures per IP before a report is sent
+      - ABUSE_REPORT_INTERVAL=15m  # Cooldown per IP after a report. 15 minutes is a minimum. Please refer to Rate Limit in https://www.abuseipdb.com/api.html
+      - ABUSE_CLEANUP_INTERVAL=30m # How often stale IP state is purged
+      - ABUSE_STATE_EXPIRY=2h      # Interval when we will forget about IP's login attempts prior to report it
+```
+
+#### AbuseIPDB Reporting part
+
+```yaml
+      # AbuseIPDB Part
+
+      - ABUSEIPDB_ENABLED=false               # Enable Abuse IP DB reporting
+      - ABUSEIPDB_API_KEY=someKey             # Your Abuse IP DB API Key. Get one after registration: https://www.abuseipdb.com/account/api/keys
+      # Optional values
+      - ABUSEIPDB_SSH_CATEGORIES=18,22        # SSH Report categories, please refer to https://www.abuseipdb.com/categories
+      - ABUSEIPDB_TELNET_CATEGORIES=14,18,23  # Telnet Report categories, please refer to https://www.abuseipdb.com/categories
+      - ABUSEIPDB_REPORT_CLEAR_USERNAME=false # Report User names to AbuseIPDB in a clear text
+      - ABUSEIPDB_REPORT_HASHED_PASSWORD=true # Report hashed Passwords to AbuseIPDB
+      - ABUSEIPDB_REPORT_CLEAR_PASSWORD=false # Report Passwords to AbuseIPDB in a clear text. It is strongly recommended to use ABUSEIPDB_REPORT_HASHED_PASSWORD instead. Works only when report of hashed password is disabled
+```
+
+#### DShield Reporting part
+
+```yaml
+      # DShield Part
+
+      - DSHIELD_ENABLED=false                # Enable DShield reporting
+      - DSHIELD_USERID=123456789             # User ID, get it after registration: https://www.dshield.org/myaccount.html
+      - DSHIELD_API_KEY=someKey              # Your API Key. Get one after registration: https://www.dshield.org/myaccount.html
+      # Optional values
+      - DSHIELD_BATCH_SIZE=50                # Report queues the collected attempts and submits the batch once 
+      - DSHIELD_BATCH_INTERVAL=10m           # Makes sure queued entries do not wait indefinitely for the batch to fill up.
+      - DSHIELD_DEBUG=false                  # Use debug API instead of Production
+      - DSHIELD_REPORT_CLEAR_USERNAME=true   # Report User names to DShield in a clear text
+      - DSHIELD_REPORT_CLEAR_PASSWORD=true   # Report clear Passwords to DShield. DShield statistics are built from usernames / passwords, so unlike AbuseIPDB (public per-IP comments) clear credentials are on by default.
+      - DSHIELD_REPORT_HASHED_PASSWORD=false # Report hashed Passwords to DShield.
 ```
 
 ## Build local
