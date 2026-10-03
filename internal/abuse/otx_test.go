@@ -527,7 +527,7 @@ func TestNewOTXFromEnv_Defaults(t *testing.T) {
 	if b.batchSize != 25 || b.flushEvery != time.Hour {
 		t.Errorf("batch defaults = %d / %v", b.batchSize, b.flushEvery)
 	}
-	if !b.public || b.tlp != "white" || b.pulseID != "" || b.role != "" || b.pulseName != otxDefaultPulseName {
+	if !b.public || b.tlp != "white" || b.pulseID != "" || b.role != "bruteforce" || b.pulseName != otxDefaultPulseName {
 		t.Errorf("defaults = %+v", b)
 	}
 	if strings.Join(b.tags, ",") != "honeypot,ssh,telnet,brute-force" {
