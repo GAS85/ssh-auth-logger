@@ -253,7 +253,7 @@ This part is optional, you can skip it and use defaults.
 ```yaml
       # OTX Part
 
-      - OTX_ENABLED=false     # Enable DShield reporting
+      - OTX_ENABLED=false     # Enable OTX reporting
       - OTX_API_KEY=someKey   # Your API Key. Get one after registration: https://otx.alienvault.com/settings
       - OTX_PULSE_ID=pulse ID # The pulse ID is logged on creation.
                               # Set OTX_PULSE_ID to keep appending to it after a restart. 
