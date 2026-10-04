@@ -59,6 +59,7 @@ var abuseBackendFactories = []func() (Backend, logrus.Fields){
 	newDShieldFromEnv,
 	newOTXFromEnv,
 	newBlocklistDeFromEnv,
+	newSpamhausFromEnv,
 }
 
 // Credential is one observed login attempt, already filtered by the backend's privacy settings.
