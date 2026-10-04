@@ -727,3 +727,57 @@ func TestDShield_StopEndsFlushLoopAndIsIdempotent(t *testing.T) {
 		t.Fatal("stop() did not return: flushLoop is still running")
 	}
 }
+
+// ── source_ip representation ─────────────────────────────────────────────────
+
+func TestDShield_SourceIPIsAlwaysADottedOrColonStringNeverANumber(t *testing.T) {
+	srv := newDShieldServer(t)
+	b := newDShieldForTest(srv.URL, func(b *dshieldBackend) { b.batchSize = 1 })
+
+	for _, ip := range []string{"77.91.65.68", "192.0.2.1", "2001:db8::1"} {
+		b.Report(Report{IP: ip, Creds: []Credential{{Time: time.Now(), Username: "root"}}})
+	}
+
+	reqs := srv.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("requests = %d", len(reqs))
+	}
+	for i, ip := range []string{"77.91.65.68", "192.0.2.1", "2001:db8::1"} {
+		want := fmt.Sprintf(`"source_ip":%q`, ip)
+		if !strings.Contains(string(reqs[i].raw), want) {
+			t.Errorf("raw body lacks %s: %s", want, reqs[i].raw)
+		}
+	}
+}
+
+func TestDShield_DebugLogsPayloadButNeverTheSignature(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		t.Run(fmt.Sprintf("debug=%v", debug), func(t *testing.T) {
+			hook := captureLogs(t)
+			srv := newDShieldServer(t)
+			b := newDShieldForTest(srv.URL, func(b *dshieldBackend) { b.debug = debug })
+			b.batch = []dshieldLogEntry{{Timestamp: "2026-01-01T00:00:00.000000Z", SourceIP: "77.91.65.68", User: "root"}}
+			b.flush()
+
+			e := hook.find("submitting payload")
+			if !debug {
+				if e != nil {
+					t.Error("payload must only be logged in debug mode")
+				}
+				return
+			}
+			if e == nil {
+				t.Fatal("debug mode should log the payload")
+			}
+			payload := fmt.Sprint(e.Data["payload"])
+			if !strings.Contains(payload, `"source_ip":"77.91.65.68"`) {
+				t.Errorf("payload log lacks the source IP: %s", payload)
+			}
+			sent := srv.requests()[0].header.Get("X-ISC-Authorization")
+			digest := regexp.MustCompile(`Credentials=(\S+)`).FindStringSubmatch(sent)[1]
+			if strings.Contains(payload, digest) || strings.Contains(payload, "secretkey") {
+				t.Error("payload log leaks the signature or API key")
+			}
+		})
+	}
+}

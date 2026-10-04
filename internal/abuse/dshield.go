@@ -284,6 +284,14 @@ func (b *dshieldBackend) submit(batch []dshieldLogEntry) (retry bool, err error)
 		return false, err
 	}
 
+	if b.debug {
+		// Show exactly what is sent, minus the signature, so it can be compared with what the DShield dashboard displays or attached to a report to the ISC handlers.
+		redacted := dshieldPayload{Type: "cowrie", Logs: batch, AuthHeader: "<redacted>"}
+		if dump, mErr := json.Marshal(redacted); mErr == nil {
+			logger.WithField("payload", string(dump)).Info("DShield: submitting payload (debug)")
+		}
+	}
+
 	req, err := http.NewRequest(http.MethodPost, b.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return false, err
