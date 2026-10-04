@@ -328,6 +328,16 @@ This part is optional, you can skip it and use defaults.
       - OTX_INDICATOR_ROLE=bruteforce               # Role name. An unknown role could make OTX reject every batch.
 ```
 
+#### Spamhaus Reporting part
+
+```yaml
+      # Spamhaus Part
+
+      - SPAMHAUS_ENABLED=false     # Enable Spamhaus reporting
+      - SPAMHAUS_API_KEY=someKey   # Your API Key. Get one after registration: hhttps://auth.spamhaus.org/account/
+      - SPAMHAUS_THREAT_TYPE=attack # Please refer to https://submit.spamhaus.org/api/#threats-types
+```
+
 ## Build local
 
 Fork this project and then execute:
