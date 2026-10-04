@@ -192,7 +192,7 @@ services:
           max-size: 10m
 ```
 
-Docker compose example with [`env`](.env_example) file:
+Docker compose example with [`.env`](.env) file:
 
 ```yaml
 # Create isolated network
@@ -237,9 +237,7 @@ services:
 
 ### Abuse Reporting
 
-Currently we do support [AbuseIPDB](https://www.abuseipdb.com/), [OTX](https://otx.alienvault.com/) and [Dshield](https://www.dshield.org/) reporting.
-
-[blocklist](https://www.blocklist.de/) support is planned.
+Currently we do support [AbuseIPDB](https://www.abuseipdb.com/), [OTX](https://otx.alienvault.com/), [Blocklist.de](https://www.blocklist.de/) and [Dshield](https://www.dshield.org/) reporting.
 
 It you would like to enable reporting, please add following config:
 
@@ -271,6 +269,24 @@ This part is optional, you can skip it and use defaults.
       - ABUSEIPDB_REPORT_CLEAR_USERNAME=false # Report User names to AbuseIPDB in a clear text
       - ABUSEIPDB_REPORT_HASHED_PASSWORD=true # Report hashed Passwords to AbuseIPDB
       - ABUSEIPDB_REPORT_CLEAR_PASSWORD=false # Report Passwords to AbuseIPDB in a clear text. It is strongly recommended to use ABUSEIPDB_REPORT_HASHED_PASSWORD instead. Works only when report of hashed password is disabled
+```
+
+#### Blocklist Reporting part
+
+```yaml
+      # Blocklist Part
+
+      - BLOCKLIST_ENABLED=false # Enable Blocklist reporting.
+      - BLOCKLIST_SERVER=none   # Your server ID or e-mail. Get one after registration: https://www.blocklist.de/en/profile/server.html
+      - BLOCKLIST_API_KEY=none  # Your API Key. Get one after registration: https://www.blocklist.de/en/profile/server.html
+
+      # Optional values
+      - BLOCKLIST_SSH_SERVICE=ssh             # Service tag for SSH. See Complete list of service names: https://www.blocklist.de/en/download.html#services
+      - BLOCKLIST_TELNET_SERVICE=ssh-auth     # Service tag for telnet. If empty, so Telnet is not reported.
+                                              # Block list has no service name for a telnet, you can use different one from SSH, just to separate it, or the same one.
+      - BLOCKLIST_REPORT_CLEAR_USERNAME=true  # Report User names to Blocklist in a clear text
+      - BLOCKLIST_REPORT_HASHED_PASSWORD=true # Report hashed Passwords to Blocklist
+      - BLOCKLIST_REPORT_CLEAR_PASSWORD=false # Report Passwords to Blocklist in a clear text. It is strongly recommended to use BLOCKLIST_REPORT_HASHED_PASSWORD instead. Works only when report of hashed password is disabled.
 ```
 
 #### DShield Reporting part
