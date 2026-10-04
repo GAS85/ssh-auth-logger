@@ -21,7 +21,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const appName = "ssh-auth-logger"
+const (
+	appName = "ssh-auth-logger"
+
+	// Will be replaced within build
+	// appVersion = "dev"
+	// appBuild = "none"
+)
 
 // const abuseCleanupInterval = 30 * time.Minute
 // const abuseStateExpiry = 2 * time.Hour
@@ -930,6 +936,7 @@ func init() {
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
 		"Version":                     version,
+		"Build":                       commit,
 		"SSHD_BIND":                   sshd_bind,
 		"SSHD_KEY_KEY":                sshd_key_key,
 		"SSHD_RATE":                   rate,
