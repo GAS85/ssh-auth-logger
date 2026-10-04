@@ -207,6 +207,9 @@ func TestOTX_FirstBatchCreatesPulseThenPatches(t *testing.T) {
 	if c.Name != "test pulse" || !c.Public || c.TLP != "white" || len(c.Tags) != 1 || len(c.Indicators) != 2 {
 		t.Errorf("create body = %+v", c)
 	}
+	if len(c.References) != 1 || c.References[0] != "https://github.com/GAS85/ssh-auth-logger" {
+		t.Errorf("references = %v, want the project URL", c.References)
+	}
 	if c.Indicators[0].Indicator != "198.51.100.1" || c.Indicators[0].Type != "IPv4" || c.Indicators[0].Role != "scanning_host" {
 		t.Errorf("indicator = %+v", c.Indicators[0])
 	}
@@ -232,6 +235,9 @@ func TestOTX_FirstBatchCreatesPulseThenPatches(t *testing.T) {
 	}
 	if strings.Contains(string(reqs[1].raw), `"name"`) {
 		t.Error("patch body must contain only indicators")
+	}
+	if strings.Contains(string(reqs[1].raw), "references") {
+		t.Error("references belong to pulse creation only, not to the indicator patch")
 	}
 }
 
@@ -643,5 +649,35 @@ func TestOTX_RegisteredAndSharedCoreFlow(t *testing.T) {
 	}
 	if strings.Contains(string(reqs[0].raw), "root") {
 		t.Error("username leaked")
+	}
+}
+func TestOTX_CreateBodyCarriesProjectReference(t *testing.T) {
+	srv := newOTXServer(t)
+	b := newOTXForTest(srv.URL)
+	b.Report(otxRep("198.51.100.1", "SSH"))
+	b.Report(otxRep("198.51.100.2", "SSH"))
+
+	reqs := srv.requests()
+	if len(reqs) != 1 || reqs[0].method != http.MethodPost {
+		t.Fatalf("requests = %+v", reqs)
+	}
+	// Raw JSON check: OTX expects "references" as a list of strings.
+	if !strings.Contains(string(reqs[0].raw), `"references":["https://github.com/GAS85/ssh-auth-logger"]`) {
+		t.Errorf("create body lacks the reference: %s", reqs[0].raw)
+	}
+}
+
+func TestOTX_ReferenceNotSentWhenAppendingToExistingPulse(t *testing.T) {
+	srv := newOTXServer(t)
+	b := newOTXForTest(srv.URL, func(b *otxBackend) { b.pulseID = "abc123" })
+	b.Report(otxRep("198.51.100.1", "SSH"))
+	b.Report(otxRep("198.51.100.2", "SSH"))
+
+	reqs := srv.requests()
+	if len(reqs) != 1 || reqs[0].method != http.MethodPatch {
+		t.Fatalf("requests = %+v", reqs)
+	}
+	if strings.Contains(string(reqs[0].raw), "references") {
+		t.Errorf("an existing pulse must not be touched beyond its indicators: %s", reqs[0].raw)
 	}
 }

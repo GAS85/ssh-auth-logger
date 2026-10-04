@@ -31,6 +31,9 @@ const (
 
 	otxDefaultPulseName = "GAS85/ssh-auth-logger honeypot: SSH/Telnet brute-force sources"
 
+	// otxReferenceURL is attached to every pulse this backend creates, as an OTX "reference".
+	otxReferenceURL = "https://github.com/GAS85/ssh-auth-logger"
+
 	// If the API is unreachable, keep at most batchSize*otxMaxQueueFactor indicators; the oldest are dropped first.
 	otxMaxQueueFactor = 4
 )
@@ -50,6 +53,7 @@ type otxCreateBody struct {
 	Public      bool           `json:"public"`
 	TLP         string         `json:"TLP"`
 	Tags        []string       `json:"tags"`
+	References  []string       `json:"references"`
 	Indicators  []otxIndicator `json:"indicators"`
 }
 
@@ -300,6 +304,7 @@ func (b *otxBackend) submit(batch []otxIndicator) (retry bool, err error) {
 			Public:      b.public,
 			TLP:         b.tlp,
 			Tags:        b.tags,
+			References:  []string{otxReferenceURL},
 			Indicators:  batch,
 		})
 	} else {
