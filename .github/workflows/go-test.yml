@@ -41,6 +41,12 @@ jobs:
             -v \
             -timeout 120s
 
+      - name: Run tests with race detector
+        run: go test ./... \
+                -race \
+                -v \
+                -timeout 120s
+
       - name: Upload coverage to Codecov
         # https://github.com/codecov/codecov-action/releases/tag/v6.0.1
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354

@@ -25,17 +25,11 @@ const (
 	appName = "ssh-auth-logger"
 
 	// Will be replaced within build
-	// appVersion = "dev"
-	// appBuild = "none"
+	appVersion = "dev"
+	appBuild = "__none__"
 )
 
-// const abuseCleanupInterval = 30 * time.Minute
-// const abuseStateExpiry = 2 * time.Hour
-
 var (
-	version = "dev"
-	commit  = "unknown"
-
 	telnetBind             string
 	telnetLogClearPassword bool
 	telnetRate             int
@@ -864,9 +858,6 @@ func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
-	version = getEnvWithDefault("VERSION", "dev")
-	commit = getEnvWithDefault("COMMIT", "unknown")
-
 	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
 
 	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
@@ -930,13 +921,13 @@ func init() {
 	abuseReporter, abuseStartupFields = abuse.Setup(abuse.Options{
 		Logger:    logger,
 		Getenv:    getEnvWithDefault,
-		UserAgent: appName + "/" + version,
+		UserAgent: appName + "/" + appVersion,
 	})
 
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
-		"Version":                     version,
-		"Build":                       commit,
+		"Version":                     appVersion,
+		"Build":                       appBuild[:8],
 		"SSHD_BIND":                   sshd_bind,
 		"SSHD_KEY_KEY":                sshd_key_key,
 		"SSHD_RATE":                   rate,

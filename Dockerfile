@@ -1,12 +1,18 @@
 FROM golang:alpine AS builder
 
 ARG VERSION=dev
-ARG VCS_REF=dev
+ARG VCS_REF=__none__
 ARG BUILD_DATE=unknown
 
 WORKDIR /app
 
 COPY . .
+
+# Write version and build into the binary file.
+# '__none__' shall be longer than 8 symbols
+RUN sed -e "s/appVersion = \"dev\"/appVersion = \"$VERSION\"/" \
+        -e "s/appBuild = \"__none__\"/appBuild = \"$VCS_REF\"/" \
+        -i main.go
 
 RUN go install . 
 
