@@ -63,9 +63,10 @@ func newBlocklistDeFromEnv() (Backend, logrus.Fields) {
 		server: server,
 		apiKey: apiKey,
 
-		sshService: getenv("BLOCKLIST_SSH_SERVICE", "ssh"),
-		// blocklist.de has no "telnet" service in its published list, so Telnet is only reported if a service is configured explicitly.
-		telnetService: getenv("BLOCKLIST_TELNET_SERVICE", "ssh-auth"),
+		sshService: getenv("BLOCKLIST_SSH_SERVICE", "ssh-auth"),
+		// blocklist.de has no "telnet" service in its published list. Will set one from apache
+		// https://www.blocklist.de/en/download.html#services
+		telnetService: getenv("BLOCKLIST_TELNET_SERVICE", "bruteforcelogin"),
 
 		reportClearUsername:  clearUsername,
 		reportClearPassword:  clearPassword && !hashedPassword,

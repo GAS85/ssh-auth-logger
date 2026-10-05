@@ -365,7 +365,7 @@ func TestNewBlocklistDeFromEnv_Defaults(t *testing.T) {
 	if b.server != "me@example.org" || b.apiKey != "TOPSECRET" {
 		t.Error("credentials not read")
 	}
-	if b.sshService != "ssh" || b.telnetService != "ssh-auth" {
+	if b.sshService != "ssh-auth" || b.telnetService != "bruteforcelogin" {
 		t.Errorf("services = %q / %q", b.sshService, b.telnetService)
 	}
 	if !b.reportClearUsername || b.reportClearPassword || !b.reportHashedPassword {
@@ -377,7 +377,7 @@ func TestNewBlocklistDeFromEnv_Defaults(t *testing.T) {
 	if b.httpClient.Timeout != 10*time.Second || b.httpClient.CheckRedirect == nil {
 		t.Error("client needs a timeout and must block redirects")
 	}
-	if fields["BLOCKLIST_ENABLED"] != true || fields["BLOCKLIST_SSH_SERVICE"] != "ssh" {
+	if fields["BLOCKLIST_ENABLED"] != true || fields["BLOCKLIST_SSH_SERVICE"] != "ssh-auth" {
 		t.Errorf("fields = %v", fields)
 	}
 	for k, v := range fields {

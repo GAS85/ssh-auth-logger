@@ -281,12 +281,12 @@ This part is optional, you can skip it and use defaults.
       - BLOCKLIST_API_KEY=none  # Your API Key. Get one after registration: https://www.blocklist.de/en/profile/server.html
 
       # Optional values
-      - BLOCKLIST_SSH_SERVICE=ssh             # Service tag for SSH. See Complete list of service names: https://www.blocklist.de/en/download.html#services
-      - BLOCKLIST_TELNET_SERVICE=ssh-auth     # Service tag for telnet. If empty, so Telnet is not reported.
-                                              # Block list has no service name for a telnet, you can use different one from SSH, just to separate it, or the same one.
-      - BLOCKLIST_REPORT_CLEAR_USERNAME=true  # Report User names to Blocklist in a clear text
-      - BLOCKLIST_REPORT_HASHED_PASSWORD=true # Report hashed Passwords to Blocklist
-      - BLOCKLIST_REPORT_CLEAR_PASSWORD=false # Report Passwords to Blocklist in a clear text. It is strongly recommended to use BLOCKLIST_REPORT_HASHED_PASSWORD instead. Works only when report of hashed password is disabled.
+      - BLOCKLIST_SSH_SERVICE=ssh-auth            # Service tag for SSH. See Complete list of service names: https://www.blocklist.de/en/download.html#services
+      - BLOCKLIST_TELNET_SERVICE=bruteforcelogin  # Service tag for telnet. If empty, so Telnet is not reported.
+                                                  # Block list has no service name for a telnet, you can use different one from SSH, just to separate it, or the same one.
+      - BLOCKLIST_REPORT_CLEAR_USERNAME=true      # Report User names to Blocklist in a clear text
+      - BLOCKLIST_REPORT_HASHED_PASSWORD=true     # Report hashed Passwords to Blocklist
+      - BLOCKLIST_REPORT_CLEAR_PASSWORD=false     # Report Passwords to Blocklist in a clear text. It is strongly recommended to use BLOCKLIST_REPORT_HASHED_PASSWORD instead. Works only when report of hashed password is disabled.
 ```
 
 #### DShield Reporting part
