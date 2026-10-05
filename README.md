@@ -10,7 +10,6 @@ A low/zero interaction ssh authentication logging honeypot. Initially developed 
 [![Docker hub](https://img.shields.io/badge/Docker--hub-grey?logo=docker)][docker-hub]
 [![Docker Pulls][docker-pulls]][docker-hub]
 [![Docker Image Size][docker-size]][docker-hub]
-[![Docker Image Size][docker-size]][docker-hub]
 
 [![GHCR Latest Version](https://ghcr-badge.egpl.dev/gas85/ssh-auth-logger/latest_tag?color=%2344cc11&ignore=latest&label=ghcr+version)](https://github.com/GAS85/ssh-auth-logger/pkgs/container/ssh-auth-logger)
 [![GHCR Image size](https://ghcr-badge.egpl.dev/gas85/ssh-auth-logger/size?color=%2344cc11&tag=latest&label=image+size)](https://github.com/GAS85/ssh-auth-logger/pkgs/container/ssh-auth-logger)
