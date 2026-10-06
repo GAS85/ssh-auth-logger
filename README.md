@@ -34,11 +34,16 @@ ssh-auth-logger logs all authentication attempts as json making it easy to consu
 
 ssh-auth-logger uses HMAC to hash the destination IP address and a key in order to generate a consistently "random" key for every responding IP address.  This means you can run ssh-auth-logger on a /16 and every ip address will appear with a different host key. Random sshd version reporting as well.
 
-### AbuseIPDB Reporting
+### Abuse Reporting
 
-Optionally ssh-auth-logger will report IPs to the [AbuseIPDB](https://www.abuseipdb.com).
+Optionally ssh-auth-logger will report IPs to the:
 
-Example of AbuseIPDB report:
+- [AbuseIPDB](https://www.abuseipdb.com)
+- [OTX](https://otx.alienvault.com/)
+- [Blocklist.de](https://www.blocklist.de/)
+- [Dshield](https://www.dshield.org/)
+
+Example of AbuseIPDB report sent:
 
 ```plain
 SSH authentication brute-force attempt against GAS85/ssh-auth-logger honeypot; usernames=["sysadmin" "winter" "hardy" "esuser" "root" "rr" "jumpuser"]; passwords sha1 prefix=["d033e22a" "7c4a8d09" "44d4965a" "07c536c2" "c539153b" "843cbacc" "1530df65" "d8b93126" "0a27e12d" "c8eb02c9"]
@@ -84,7 +89,7 @@ SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames
 If you enable Passwords hashes reporting, it will be add:
 
 ```plain
-SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords_sha1=["0bddc96375f465f6fd6462cc9481ab7605fe40b1" "060b3b99f88e96085b4a68e095bc9e3d1d91e1bc" "96900d99a52db0558d15a37766a4125762b75ac6" "94510c89ec1e494522c303497e6a6c0e71961f6a" "7f2c116fbdea1207e84a4ce066ce1617c1940ea6" "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8" "5036854299afc07432c453b340971eee638a585b" "0cf05b6e4c2b64372848a1d36afc00b36dd696ff" "937ab279a60dcaac3ba1b419b6ce1ecf7ec0a642" "a33a2383c34c63e28b3420cf30d644d9936d0af5"] 
+SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords sha1 prefix=["7110eda4" "b3796004" "39ef9aae" "7c4a8d09" "90d3cf82" "4b9bfe79" "4e7afebc" "34b6ede1" "01b307ac"]
 ```
 
 You can enable plain passwords reporting via `ABUSEIPDB_REPORT_CLEAR_PASSWORD`, but this is **not recommended**, please report hashes instead.
@@ -106,6 +111,7 @@ export SSHD_BIND=:2222
 To bind to port 22 directly:
 
 ```shell
+export SSHD_BIND=:22
 sudo setcap cap_net_bind_service=+ep ~/go/bin/ssh-auth-logger
 ```
 
@@ -113,13 +119,21 @@ sudo setcap cap_net_bind_service=+ep ~/go/bin/ssh-auth-logger
 
 ### Run with docker
 
-Bind to port 2222 in a host machine
+Bind to port `2222` in a host machine.
+
+From the [Docker hub](https://hub.docker.com/r/gas85/ssh-auth-logger):
 
 ```shell
-docker run -t -i --rm  -p 2222:2222 gas85/ssh-auth-logger:latest
+docker run -t -i --rm -p 2222:2222 gas85/ssh-auth-logger:latest
 ```
 
-Test connections
+From the [Github Packages](https://github.com/GAS85/ssh-auth-logger/pkgs/container/ssh-auth-logger):
+
+```shell
+docker run -t -i --rm -p 2222:2222 ghcr.io/gas85/ssh-auth-logger:latest
+```
+
+Test connections:
 
 ```shell
 ssh user@localhost -p 2222 -o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o UserKnownHostsFile=/dev/null -o NumberOfPasswordPrompts=10
@@ -143,6 +157,7 @@ services:
       - TZ=Europe/Berlin  # You can set Time Zone to see logs with your local time
 
       # Following are default values
+
       #- LOG_TO=consol                              # You can set to "console" (the default), "file" or "both".
       #- LOG_FILE_PATH=/var/log/ssh-auth-logger.log # Specify log file path inside of container
       #- LOG_FILTER=""                              # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product"
@@ -163,9 +178,9 @@ services:
 
       # Telnet Part
 
-      #- TELNET_BIND=:2323                     # Port and interface telnetd to listen
-      #- TELNET_LOG_CLEAR_PASSWORD=true        # Log Passwords as clear text or Base64 coded
-      #- TELNET_RATE=100                       # bits per second, emulate very slow connection
+      #- TELNET_BIND=:2323              # Port and interface telnetd to listen
+      #- TELNET_LOG_CLEAR_PASSWORD=true # Log Passwords as clear text or Base64 coded
+      #- TELNET_RATE=100                # bits per second, emulate very slow connection
     volumes:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log
@@ -227,7 +242,7 @@ services:
     # Health check is build in, so you do not needed it. Use only if you will set different test or parameters.
     # healthcheck:
        # Will test if port application is up AND log file was not vanished by host machine log rotate
-    #   test: nc -zv localhost:$$SSHD_BIND && test -s /var/log/ssh-auth-logger.log || exit 1
+    #   test: nc -zv localhost$$SSHD_BIND && test -s /var/log/ssh-auth-logger.log || exit 1
     #   interval: 5m00s
     #   timeout: 5s
     #   retries: 2
@@ -238,15 +253,15 @@ services:
           max-size: 10m
 ```
 
-### Abuse Reporting
+### Abuse Reporting Setup
 
 Currently we do support [AbuseIPDB](https://www.abuseipdb.com/), [OTX](https://otx.alienvault.com/), [Blocklist.de](https://www.blocklist.de/) and [Dshield](https://www.dshield.org/) reporting.
 
-It you would like to enable reporting, please add following config:
+It you would like to enable reporting, please add following config.
 
 #### Common Abuse Reporting part
 
-This part is optional, you can skip it and use defaults.
+This part is optional, you can skip it and use defaults listed here.
 
 ```yaml
       # Abuse Common Setup
@@ -393,7 +408,7 @@ with following config:
 enabled = true
 filter = ssh-auth-logger
 action = iptables-allports
-         # Additonally you can setup abuseipdb reporting as per https://github.com/fail2ban/fail2ban/blob/master/config/action.d/abuseipdb.conf
+         # Additionally you can setup abuseipdb reporting as per https://github.com/fail2ban/fail2ban/blob/master/config/action.d/abuseipdb.conf
          # Or directly with ssh-auth-logger
          #abuseipdb[abuseipdb_category="18,22"]
 # Docker mount log to the localsystem
