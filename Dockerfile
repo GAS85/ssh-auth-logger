@@ -53,7 +53,7 @@ COPY --from=builder /go/bin/ssh-auth-logger /go/bin/ssh-auth-logger
 
 RUN touch /var/log/ssh-auth-logger.log && \
     chown $USER /var/log/ssh-auth-logger.log && \
-    chmod 644 /var/log/ssh-auth-logger.log
+    chmod 640 /var/log/ssh-auth-logger.log
 
 USER $USER
 
@@ -64,6 +64,6 @@ HEALTHCHECK \
     --timeout=5s \
     --retries=1 \
     --start-period=5s \
-    CMD ["sh", "-c", "pgrep ssh-auth-logger && test -s /var/log/ssh-auth-logger.log || exit 1"]
+    CMD ["sh", "-c", "pgrep ssh-auth-logger"]
 
-CMD ["/bin/sh", "-c", "test -f /var/log/ssh-auth-logger.log || { echo 'Creating log file...' && touch /var/log/ssh-auth-logger.log; }; /go/bin/ssh-auth-logger 2>&1 | tee -a /var/log/ssh-auth-logger.log"]
+CMD ["/bin/sh", "-c", "/go/bin/ssh-auth-logger"]
