@@ -26,7 +26,9 @@ const (
 
 	// Will be replaced within build
 	appVersion = "dev"
-	appBuild = "__none__"
+	appBuild   = "__none__"
+	appLicense = "MIT"
+	appSource  = "https://github.com/GAS85/ssh-auth-logger"
 )
 
 var (
@@ -926,22 +928,31 @@ func init() {
 
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
-		"Version":                     appVersion,
-		"Build":                       appBuild[:8],
-		"SSHD_BIND":                   sshd_bind,
-		"SSHD_KEY_KEY":                sshd_key_key,
-		"SSHD_RATE":                   rate,
-		"SSHD_MAX_AUTH_TRIES":         maxAuthTries,
-		"SSHD_RSA_BITS":               rsaBitsStr,
-		"SSHD_PROFILE_SCOPE":          profileScope,
-		"SSHD_SEND_BANNER":            sendBanner,
-		"SSHD_LOG_CLEAR_PASSWORD":     logClearPassword,
-		"SSHD_LOGS_FILTER":            logsEnv,
-		"SSHD_HOST_KEY_CACHE_TTL":     hostKeyCacheTTL.String(),
-		"SSHD_HOST_KEY_CACHE_CLEANUP": hostKeyCacheCleanup.String(),
-		"TELNET_BIND":                 telnetBind,
-		"TELNET_LOG_CLEAR_PASSWORD":   telnetLogClearPassword,
-		"TELNET_RATE":                 telnetRate,
+		"app": logrus.Fields{
+			"version":     appVersion,
+			"build":       appBuild[:8],
+			"name":        appName,
+			"license":     appLicense,
+			"source_code": appSource,
+		},
+		"ssh": logrus.Fields{
+			"SSHD_BIND":                   sshd_bind,
+			"SSHD_KEY_KEY":                sshd_key_key,
+			"SSHD_RATE":                   rate,
+			"SSHD_MAX_AUTH_TRIES":         maxAuthTries,
+			"SSHD_RSA_BITS":               rsaBitsStr,
+			"SSHD_PROFILE_SCOPE":          profileScope,
+			"SSHD_SEND_BANNER":            sendBanner,
+			"SSHD_LOG_CLEAR_PASSWORD":     logClearPassword,
+			"SSHD_LOGS_FILTER":            logsEnv,
+			"SSHD_HOST_KEY_CACHE_TTL":     hostKeyCacheTTL.String(),
+			"SSHD_HOST_KEY_CACHE_CLEANUP": hostKeyCacheCleanup.String(),
+		},
+		"telnet": logrus.Fields{
+			"TELNET_BIND":               telnetBind,
+			"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
+			"TELNET_RATE":               telnetRate,
+		},
 	}
 	// Only show abuse reporting configuration when at least one backend is enabled.
 	for k, v := range abuseStartupFields {

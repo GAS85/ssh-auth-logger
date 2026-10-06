@@ -64,12 +64,14 @@ func newAbuseIPDBFromEnv() (Backend, logrus.Fields) {
 	}
 
 	return b, logrus.Fields{
-		"ABUSEIPDB_ENABLED":                true,
-		"ABUSEIPDB_SSH_CATEGORIES":         b.sshCategories,
-		"ABUSEIPDB_TELNET_CATEGORIES":      b.telnetCategories,
-		"ABUSEIPDB_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
-		"ABUSEIPDB_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
-		"ABUSEIPDB_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
+		"abuseipdb": logrus.Fields{
+			"ABUSEIPDB_ENABLED":                true,
+			"ABUSEIPDB_SSH_CATEGORIES":         b.sshCategories,
+			"ABUSEIPDB_TELNET_CATEGORIES":      b.telnetCategories,
+			"ABUSEIPDB_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
+			"ABUSEIPDB_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
+			"ABUSEIPDB_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
+		},
 	}
 }
 

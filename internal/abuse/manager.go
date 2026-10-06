@@ -326,14 +326,23 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 	var backends []Backend
 	fields := logrus.Fields{}
 
+	abuseFields := logrus.Fields{
+		"ABUSE_REPORT_ATTEMPTS":  abuseAttempts,
+		"ABUSE_REPORT_INTERVAL":  abuseReportInterval.String(),
+		"ABUSE_CLEANUP_INTERVAL": abuseCleanupInterval.String(),
+		"ABUSE_STATE_EXPIRY":     abuseStateExpiry.String(),
+	}
+
 	for _, factory := range abuseBackendFactories {
 		b, f := factory()
 		if b == nil {
 			continue
 		}
+
 		backends = append(backends, b)
+
 		for k, v := range f {
-			fields[k] = v
+			abuseFields[k] = v
 		}
 	}
 
@@ -346,10 +355,7 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 	)
 
 	if len(backends) > 0 {
-		fields["ABUSE_REPORT_ATTEMPTS"] = abuseAttempts
-		fields["ABUSE_REPORT_INTERVAL"] = abuseReportInterval.String()
-		fields["ABUSE_CLEANUP_INTERVAL"] = abuseCleanupInterval.String()
-		fields["ABUSE_STATE_EXPIRY"] = abuseStateExpiry.String()
+		fields["abuse"] = abuseFields
 	}
 
 	return manager, fields
