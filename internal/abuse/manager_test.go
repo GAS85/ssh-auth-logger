@@ -17,6 +17,17 @@ type fakeBackend struct {
 	reports  chan Report
 }
 
+func asFields(v any) (map[string]any, bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		return x, true
+	case logrus.Fields:
+		return map[string]any(x), true
+	default:
+		return nil, false
+	}
+}
+
 func newFake(name string) *fakeBackend {
 	return &fakeBackend{name: name, reports: make(chan Report, 64)}
 }
@@ -526,6 +537,7 @@ func TestSetup_DefaultsWithNothingEnabled(t *testing.T) {
 
 func TestSetup_BothBackendsAndSharedSettings(t *testing.T) {
 	isolate(t)
+
 	m, fields := Setup(Options{Getenv: env(
 		"ABUSEIPDB_ENABLED", "true", "ABUSEIPDB_API_KEY", "SECRET-ABUSEIPDB",
 		"DSHIELD_ENABLED", "true", "DSHIELD_USERID", "42", "DSHIELD_API_KEY", "SECRET-DSHIELD",
@@ -536,26 +548,104 @@ func TestSetup_BothBackendsAndSharedSettings(t *testing.T) {
 	)})
 
 	t.Cleanup(m.Stop)
-	if len(m.backends) != 2 || m.backends[0].Name() != "AbuseIPDB" || m.backends[1].Name() != "DShield" {
+
+	if len(m.backends) != 2 ||
+		m.backends[0].Name() != "AbuseIPDB" ||
+		m.backends[1].Name() != "DShield" {
 		t.Fatalf("backends = %v", m.backends)
 	}
-	if m.attemptsLimit != 7 || m.reportEvery != 20*time.Minute || m.cleanupEvery != time.Hour || m.stateExpiry != 3*time.Hour {
-		t.Errorf("shared settings not applied: %d %v %v %v", m.attemptsLimit, m.reportEvery, m.cleanupEvery, m.stateExpiry)
+
+	if m.attemptsLimit != 7 ||
+		m.reportEvery != 20*time.Minute ||
+		m.cleanupEvery != time.Hour ||
+		m.stateExpiry != 3*time.Hour {
+		t.Errorf(
+			"shared settings not applied: %d %v %v %v",
+			m.attemptsLimit,
+			m.reportEvery,
+			m.cleanupEvery,
+			m.stateExpiry,
+		)
 	}
 
-	if fields["ABUSE_REPORT_ATTEMPTS"] != 7 || fields["ABUSE_REPORT_INTERVAL"] != "20m0s" ||
-		fields["ABUSE_CLEANUP_INTERVAL"] != "1h0m0s" || fields["ABUSE_STATE_EXPIRY"] != "3h0m0s" {
-		t.Errorf("shared startup fields wrong: %v", fields)
-	}
-	if fields["ABUSEIPDB_ENABLED"] != true || fields["DSHIELD_ENABLED"] != true || fields["DSHIELD_USERID"] != "42" {
-		t.Errorf("backend startup fields missing: %v", fields)
+	// Startup fields now use the hierarchical structure:
+	//
+	// abuse:
+	//   ABUSE_...
+	//   abuseipdb:
+	//     ABUSEIPDB_...
+	//   dshield:
+	//     DSHIELD_...
+	abuseRaw, ok := fields["abuse"]
+	if !ok {
+		t.Fatalf("missing abuse startup fields: %v", fields)
 	}
 
-	for k, v := range fields {
-		if s, ok := v.(string); ok && strings.Contains(s, "SECRET") {
-			t.Errorf("startup field %s leaks a secret: %q", k, s)
+	abuse, ok := asFields(abuseRaw)
+	if !ok {
+		t.Fatalf("fields[abuse] = %T, want map[string]any", abuseRaw)
+	}
+
+	// Shared abuse settings remain directly under "abuse".
+	if abuse["ABUSE_REPORT_ATTEMPTS"] != 7 ||
+		abuse["ABUSE_REPORT_INTERVAL"] != "20m0s" ||
+		abuse["ABUSE_CLEANUP_INTERVAL"] != "1h0m0s" ||
+		abuse["ABUSE_STATE_EXPIRY"] != "3h0m0s" {
+		t.Errorf("shared startup fields wrong: %v", abuse)
+	}
+
+	// Backend-specific settings are nested under their backend name.
+	abuseIPDBRaw, ok := abuse["abuseipdb"]
+	if !ok {
+		t.Fatalf("missing abuseipdb startup fields: %v", abuse)
+	}
+
+	abuseIPDB, ok := asFields(abuseIPDBRaw)
+	if !ok {
+		t.Fatalf("fields[abuse][abuseipdb] = %T, want map[string]any", abuseIPDBRaw)
+	}
+
+	if abuseIPDB["ABUSEIPDB_ENABLED"] != true {
+		t.Errorf("ABUSEIPDB_ENABLED = %v, want true", abuseIPDB["ABUSEIPDB_ENABLED"])
+	}
+
+	dshieldRaw, ok := abuse["dshield"]
+	if !ok {
+		t.Fatalf("missing dshield startup fields: %v", abuse)
+	}
+
+	dshield, ok := asFields(dshieldRaw)
+	if !ok {
+		t.Fatalf("fields[abuse][dshield] = %T, want map[string]any", dshieldRaw)
+	}
+
+	if dshield["DSHIELD_ENABLED"] != true ||
+		dshield["DSHIELD_USERID"] != "42" {
+		t.Errorf("dshield startup fields missing: %v", dshield)
+	}
+
+	// Secrets must never appear anywhere in the startup structure.
+	var checkNoSecrets func(string, any)
+	checkNoSecrets = func(path string, v any) {
+		switch x := v.(type) {
+		case string:
+			if strings.Contains(x, "SECRET") {
+				t.Errorf("startup field %s leaks a secret: %q", path, x)
+			}
+
+		case map[string]any:
+			for k, v := range x {
+				checkNoSecrets(path+"."+k, v)
+			}
+
+		case logrus.Fields:
+			for k, v := range x {
+				checkNoSecrets(path+"."+k, v)
+			}
 		}
 	}
+
+	checkNoSecrets("fields", fields)
 }
 
 func TestSetup_OnlyOneBackendEnabled(t *testing.T) {

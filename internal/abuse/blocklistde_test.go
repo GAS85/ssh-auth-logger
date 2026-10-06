@@ -1,6 +1,7 @@
 package abuse
 
 import (
+	"github.com/sirupsen/logrus"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -377,14 +378,26 @@ func TestNewBlocklistDeFromEnv_Defaults(t *testing.T) {
 	if b.httpClient.Timeout != 10*time.Second || b.httpClient.CheckRedirect == nil {
 		t.Error("client needs a timeout and must block redirects")
 	}
-	if fields["BLOCKLIST_ENABLED"] != true || fields["BLOCKLIST_SSH_SERVICE"] != "ssh-auth" {
-		t.Errorf("fields = %v", fields)
+	blocklistFields, ok := fields["blocklist"].(logrus.Fields)
+	if !ok {
+		t.Fatalf(
+			"fields[blocklist] has type %T, want logrus.Fields",
+			fields["blocklist"],
+		)
 	}
-	for k, v := range fields {
-		if s, ok := v.(string); ok && (strings.Contains(s, "TOPSECRET") || strings.Contains(s, "me@example.org")) {
+
+	if blocklistFields["BLOCKLIST_ENABLED"] != true ||
+		blocklistFields["BLOCKLIST_SSH_SERVICE"] != "ssh-auth" {
+		t.Errorf("blocklist fields = %v", blocklistFields)
+	}
+
+	for k, v := range blocklistFields {
+		if s, ok := v.(string); ok &&
+			(strings.Contains(s, "TOPSECRET") || strings.Contains(s, "me@example.org")) {
 			t.Errorf("startup field %s leaks %q", k, s)
 		}
 	}
+
 }
 
 func TestNewBlocklistDeFromEnv_Overrides(t *testing.T) {
@@ -403,9 +416,20 @@ func TestNewBlocklistDeFromEnv_HashedOverridesClear(t *testing.T) {
 		"BLOCKLIST_REPORT_CLEAR_PASSWORD", "true", "BLOCKLIST_REPORT_HASHED_PASSWORD", "true")
 	be, fields := newBlocklistDeFromEnv()
 	b := be.(*blocklistDeBackend)
-	if b.reportClearPassword || !b.reportHashedPassword || fields["BLOCKLIST_REPORT_CLEAR_PASSWORD"] != false {
-		t.Fatalf("hashed must override clear: %+v / %v", b, fields)
+	blocklistFields, ok := fields["blocklist"].(logrus.Fields)
+	if !ok {
+		t.Fatalf(
+			"fields[blocklist] has type %T, want logrus.Fields",
+			fields["blocklist"],
+		)
 	}
+
+	if b.reportClearPassword ||
+		!b.reportHashedPassword ||
+		blocklistFields["BLOCKLIST_REPORT_CLEAR_PASSWORD"] != false {
+		t.Fatalf("hashed must override clear: %+v / %v", b, blocklistFields)
+	}
+
 }
 
 func TestNewBlocklistDeFromEnv_MissingCredentialsAreFatal(t *testing.T) {
@@ -493,9 +517,30 @@ func TestSetup_BlocklistDeRegistered(t *testing.T) {
 	if len(m.backends) != 1 || m.backends[0].Name() != "blocklist.de" {
 		t.Fatalf("backends = %v", m.backends)
 	}
-	if fields["BLOCKLIST_ENABLED"] != true || fields["ABUSE_REPORT_ATTEMPTS"] != 10 {
-		t.Errorf("fields = %v", fields)
+	abuseFields, ok := fields["abuse"].(logrus.Fields)
+	if !ok {
+		t.Fatalf(
+			"fields[abuse] has type %T, want logrus.Fields",
+			fields["abuse"],
+		)
 	}
+
+	if abuseFields["ABUSE_REPORT_ATTEMPTS"] != 10 {
+		t.Errorf("abuse fields = %v", abuseFields)
+	}
+
+	blocklistFields, ok := abuseFields["blocklist"].(logrus.Fields)
+	if !ok {
+		t.Fatalf(
+			"abuse[blocklist] has type %T, want logrus.Fields",
+			abuseFields["blocklist"],
+		)
+	}
+
+	if blocklistFields["BLOCKLIST_ENABLED"] != true {
+		t.Errorf("blocklist fields = %v", blocklistFields)
+	}
+
 }
 
 func TestSetup_AllThreeBackendsInOrder(t *testing.T) {

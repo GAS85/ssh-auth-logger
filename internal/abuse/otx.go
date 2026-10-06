@@ -162,15 +162,17 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 	go b.flushLoop()
 
 	return b, logrus.Fields{
-		"OTX_ENABLED":        true,
-		"OTX_PULSE_ID":       b.pulseID,
-		"OTX_PULSE_NAME":     b.pulseName,
-		"OTX_PUBLIC":         b.public,
-		"OTX_TLP":            b.tlp,
-		"OTX_TAGS":           strings.Join(b.tags, ","),
-		"OTX_INDICATOR_ROLE": b.role,
-		"OTX_BATCH_SIZE":     b.batchSize,
-		"OTX_BATCH_INTERVAL": b.flushEvery.String(),
+		"otx": logrus.Fields{
+			"OTX_ENABLED":        true,
+			"OTX_PULSE_ID":       b.pulseID,
+			"OTX_PULSE_NAME":     b.pulseName,
+			"OTX_PUBLIC":         b.public,
+			"OTX_TLP":            b.tlp,
+			"OTX_TAGS":           strings.Join(b.tags, ","),
+			"OTX_INDICATOR_ROLE": b.role,
+			"OTX_BATCH_SIZE":     b.batchSize,
+			"OTX_BATCH_INTERVAL": b.flushEvery.String(),
+		},
 	}
 }
 

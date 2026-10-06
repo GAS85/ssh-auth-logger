@@ -533,7 +533,8 @@ func TestNewOTXFromEnv_Defaults(t *testing.T) {
 	if b.batchSize != 25 || b.flushEvery != time.Hour {
 		t.Errorf("batch defaults = %d / %v", b.batchSize, b.flushEvery)
 	}
-	if !b.public || b.tlp != "white" || b.pulseID != "" || b.role != "bruteforce" || b.pulseName != otxDefaultPulseName {
+	if !b.public || b.tlp != "white" || b.pulseID != "" ||
+		b.role != "bruteforce" || b.pulseName != otxDefaultPulseName {
 		t.Errorf("defaults = %+v", b)
 	}
 	if strings.Join(b.tags, ",") != "honeypot,ssh,telnet,brute-force" {
@@ -542,10 +543,24 @@ func TestNewOTXFromEnv_Defaults(t *testing.T) {
 	if b.httpClient.Timeout == 0 || b.httpClient.CheckRedirect == nil {
 		t.Error("http client must have a timeout and block redirects")
 	}
-	if fields["OTX_BATCH_SIZE"] != 25 || fields["OTX_BATCH_INTERVAL"] != "1h0m0s" || fields["OTX_TLP"] != "white" {
-		t.Errorf("fields = %v", fields)
+
+	abuseFields, ok := asFields(fields)
+	if !ok {
+		t.Fatalf("fields[abuse] = %T, want map[string]any", fields)
 	}
-	for k, v := range fields {
+
+	otxFields, ok := asFields(abuseFields["otx"])
+	if !ok {
+		t.Fatalf("fields[abuse][otx] = %T, want map[string]any", abuseFields["otx"])
+	}
+
+	if otxFields["OTX_BATCH_SIZE"] != 25 ||
+		otxFields["OTX_BATCH_INTERVAL"] != "1h0m0s" ||
+		otxFields["OTX_TLP"] != "white" {
+		t.Errorf("fields[abuse][otx] = %v", otxFields)
+	}
+
+	for k, v := range otxFields {
 		if v == "TOPSECRET" {
 			t.Errorf("field %s leaks the API key", k)
 		}
@@ -553,22 +568,59 @@ func TestNewOTXFromEnv_Defaults(t *testing.T) {
 }
 
 func TestNewOTXFromEnv_Overrides(t *testing.T) {
-	useEnv(t, "OTX_ENABLED", "true", "OTX_API_KEY", "k",
-		"OTX_PULSE_ID", "p1", "OTX_PULSE_NAME", "mine", "OTX_PUBLIC", "false", "OTX_TLP", "AMBER",
-		"OTX_TAGS", " a, b ,,a", "OTX_INDICATOR_ROLE", "scanning_host",
-		"OTX_BATCH_SIZE", "5", "OTX_BATCH_INTERVAL", "30s")
+	useEnv(t,
+		"OTX_ENABLED", "true",
+		"OTX_API_KEY", "k",
+		"OTX_PULSE_ID", "p1",
+		"OTX_PULSE_NAME", "mine",
+		"OTX_PUBLIC", "false",
+		"OTX_TLP", "AMBER",
+		"OTX_TAGS", " a, b ,,a",
+		"OTX_INDICATOR_ROLE", "scanning_host",
+		"OTX_BATCH_SIZE", "5",
+		"OTX_BATCH_INTERVAL", "30s",
+	)
+
 	be, fields := newOTXFromEnv()
 	b := be.(*otxBackend)
 	t.Cleanup(b.stop)
 
-	if b.pulseID != "p1" || b.pulseName != "mine" || b.public || b.tlp != "amber" || b.role != "scanning_host" {
+	if b.pulseID != "p1" ||
+		b.pulseName != "mine" ||
+		b.public ||
+		b.tlp != "amber" ||
+		b.role != "scanning_host" {
 		t.Errorf("overrides not applied: %+v", b)
 	}
+
 	if strings.Join(b.tags, ",") != "a,b" {
 		t.Errorf("tags = %v, want trimmed and de-duplicated", b.tags)
 	}
-	if b.batchSize != 5 || b.flushEvery != 30*time.Second || fields["OTX_PULSE_ID"] != "p1" {
-		t.Errorf("batch/fields wrong: %d %v %v", b.batchSize, b.flushEvery, fields)
+
+	if b.batchSize != 5 || b.flushEvery != 30*time.Second {
+		t.Errorf("batch = %d / %v", b.batchSize, b.flushEvery)
+	}
+
+	abuseFields, ok := asFields(fields)
+	if !ok {
+		t.Fatalf("fields[abuse] = %T, want map[string]any", fields)
+	}
+
+	otxFields, ok := asFields(abuseFields["otx"])
+	if !ok {
+		t.Fatalf("fields[abuse][otx] = %T, want map[string]any", abuseFields["otx"])
+	}
+
+	if otxFields["OTX_PULSE_ID"] != "p1" ||
+		otxFields["OTX_BATCH_SIZE"] != 5 ||
+		otxFields["OTX_BATCH_INTERVAL"] != "30s" {
+		t.Errorf("fields[abuse][otx] = %v", otxFields)
+	}
+
+	for k, v := range otxFields {
+		if v == "k" {
+			t.Errorf("field %s leaks the API key", k)
+		}
 	}
 }
 

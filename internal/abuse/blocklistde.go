@@ -82,12 +82,14 @@ func newBlocklistDeFromEnv() (Backend, logrus.Fields) {
 
 	// The server e-mail / API key are deliberately not part of the startup log.
 	return b, logrus.Fields{
-		"BLOCKLIST_ENABLED":                true,
-		"BLOCKLIST_SSH_SERVICE":            b.sshService,
-		"BLOCKLIST_TELNET_SERVICE":         b.telnetService,
-		"BLOCKLIST_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
-		"BLOCKLIST_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
-		"BLOCKLIST_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
+		"blocklist": logrus.Fields{
+			"BLOCKLIST_ENABLED":                true,
+			"BLOCKLIST_SSH_SERVICE":            b.sshService,
+			"BLOCKLIST_TELNET_SERVICE":         b.telnetService,
+			"BLOCKLIST_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
+			"BLOCKLIST_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
+			"BLOCKLIST_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
+		},
 	}
 }
 

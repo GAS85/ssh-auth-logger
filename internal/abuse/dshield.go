@@ -130,14 +130,16 @@ func newDShieldFromEnv() (Backend, logrus.Fields) {
 	go b.flushLoop()
 
 	return b, logrus.Fields{
-		"DSHIELD_ENABLED":                true,
-		"DSHIELD_USERID":                 b.userID,
-		"DSHIELD_BATCH_SIZE":             b.batchSize,
-		"DSHIELD_BATCH_INTERVAL":         b.flushEvery.String(),
-		"DSHIELD_DEBUG":                  b.debug,
-		"DSHIELD_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
-		"DSHIELD_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
-		"DSHIELD_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
+		"dshield": logrus.Fields{
+			"DSHIELD_ENABLED":                true,
+			"DSHIELD_USERID":                 b.userID,
+			"DSHIELD_BATCH_SIZE":             b.batchSize,
+			"DSHIELD_BATCH_INTERVAL":         b.flushEvery.String(),
+			"DSHIELD_DEBUG":                  b.debug,
+			"DSHIELD_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
+			"DSHIELD_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
+			"DSHIELD_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
+		},
 	}
 }
 

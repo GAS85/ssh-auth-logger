@@ -68,8 +68,10 @@ func newSpamhausFromEnv() (Backend, logrus.Fields) {
 	}
 
 	return b, logrus.Fields{
-		"SPAMHAUS_ENABLED":     true,
-		"SPAMHAUS_THREAT_TYPE": b.threatType,
+		"spamhouse": logrus.Fields{
+			"SPAMHAUS_ENABLED":     true,
+			"SPAMHAUS_THREAT_TYPE": b.threatType,
+		},
 	}
 }
 

@@ -26,7 +26,9 @@ const (
 
 	// Will be replaced within build
 	appVersion = "dev"
-	appBuild = "__none__"
+	appBuild   = "__none__"
+	appLicense = "MIT"
+	appSource  = "https://github.com/GAS85/ssh-auth-logger"
 )
 
 var (
@@ -858,12 +860,19 @@ func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
+	// Log destination: LOG_TO=console (default), file or both. Until the startup message is out, everything is also written to the console (see logOutputs), so the configuration is always visible there; afterwards only LOG_TO decides.
+	logFilePath := getEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
+	logOut, err := setupLogOutput(getEnvWithDefault("LOG_TO", logToConsole), logFilePath, os.Stderr)
+	if err != nil {
+		logrus.Fatal(err)
+	}
+	logrus.SetOutput(logOut.Startup)
+
 	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
 
 	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
 	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", "Take me to your leader")
 	rateStr := getEnvWithDefault("SSHD_RATE", "500") // default rate is 500 bytes per second very slow...
-	var err error
 	rate, err = strconv.Atoi(rateStr)
 	if err != nil {
 		logrus.Fatal("Invalid SSHD_RATE environment variable")
@@ -895,7 +904,7 @@ func init() {
 	telnetLogClearPasswordStr := getEnvWithDefault("TELNET_LOG_CLEAR_PASSWORD", "true")
 	telnetLogClearPassword = telnetLogClearPasswordStr == "1" || telnetLogClearPasswordStr == "true" || telnetLogClearPasswordStr == "yes"
 	// Comma-separated list of allowed fields, "" means all, " " means none
-	logsEnv := getEnvWithDefault("SSHD_LOGS_FILTER", "")
+	logsEnv := getEnvWithDefault("LOG_FILTER", "")
 
 	// Configure Host key cache TTL
 	hostKeyCacheTTLStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_TTL", "24h")
@@ -926,28 +935,44 @@ func init() {
 
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
-		"Version":                     appVersion,
-		"Build":                       appBuild[:8],
-		"SSHD_BIND":                   sshd_bind,
-		"SSHD_KEY_KEY":                sshd_key_key,
-		"SSHD_RATE":                   rate,
-		"SSHD_MAX_AUTH_TRIES":         maxAuthTries,
-		"SSHD_RSA_BITS":               rsaBitsStr,
-		"SSHD_PROFILE_SCOPE":          profileScope,
-		"SSHD_SEND_BANNER":            sendBanner,
-		"SSHD_LOG_CLEAR_PASSWORD":     logClearPassword,
-		"SSHD_LOGS_FILTER":            logsEnv,
-		"SSHD_HOST_KEY_CACHE_TTL":     hostKeyCacheTTL.String(),
-		"SSHD_HOST_KEY_CACHE_CLEANUP": hostKeyCacheCleanup.String(),
-		"TELNET_BIND":                 telnetBind,
-		"TELNET_LOG_CLEAR_PASSWORD":   telnetLogClearPassword,
-		"TELNET_RATE":                 telnetRate,
+		"app": logrus.Fields{
+			"version":     appVersion,
+			"build":       appBuild[:8],
+			"name":        appName,
+			"license":     appLicense,
+			"source_code": appSource,
+		},
+		"ssh": logrus.Fields{
+			"SSHD_BIND":                   sshd_bind,
+			"SSHD_KEY_KEY":                sshd_key_key,
+			"SSHD_RATE":                   rate,
+			"SSHD_MAX_AUTH_TRIES":         maxAuthTries,
+			"SSHD_RSA_BITS":               rsaBitsStr,
+			"SSHD_PROFILE_SCOPE":          profileScope,
+			"SSHD_SEND_BANNER":            sendBanner,
+			"SSHD_LOG_CLEAR_PASSWORD":     logClearPassword,
+			"SSHD_HOST_KEY_CACHE_TTL":     hostKeyCacheTTL.String(),
+			"SSHD_HOST_KEY_CACHE_CLEANUP": hostKeyCacheCleanup.String(),
+		},
+		"telnet": logrus.Fields{
+			"TELNET_BIND":               telnetBind,
+			"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
+			"TELNET_RATE":               telnetRate,
+		},
+		"logging": logrus.Fields{
+			"LOG_TO":        logOut.Mode,
+			"LOG_FILE_PATH": logFilePath,
+			"LOG_FILTER":    logsEnv,
+		},
 	}
 	// Only show abuse reporting configuration when at least one backend is enabled.
 	for k, v := range abuseStartupFields {
 		startupFields[k] = v
 	}
 	logrus.WithFields(startupFields).Info("Starting SSH Auth Logger")
+
+	// Startup is done: from here on only the destination chosen with LOG_TO is used.
+	logrus.SetOutput(logOut.Runtime)
 
 	// Configure allowed log fields from environment variable
 	if logsEnv != "" {
@@ -960,11 +985,11 @@ func init() {
 		})
 	}
 
-	logsEnv, isSet := os.LookupEnv("SSHD_LOGS_FILTER")
+	logsEnv, isSet := os.LookupEnv("LOG_FILTER")
 	if isSet {
 		allowedLogFields = parseAllowedFields(logsEnv)
 		if len(allowedLogFields) == 0 {
-			logrus.Warn("SSHD_LOGS_FILTER is set but empty; no structured fields will be logged")
+			logrus.Warn("LOG_FILTER is set but empty; no structured fields will be logged")
 		}
 	}
 }
