@@ -2,6 +2,7 @@ package abuse
 
 import (
 	"errors"
+	"github.com/sirupsen/logrus"
 	"io"
 	"net/http"
 	"net/url"
@@ -402,14 +403,26 @@ func TestNewAbuseIPDBFromEnv_Defaults(t *testing.T) {
 	if b.httpClient == nil || b.httpClient.Timeout != 10*time.Second {
 		t.Error("http client with 10s timeout expected")
 	}
-	if fields["ABUSEIPDB_ENABLED"] != true || fields["ABUSEIPDB_REPORT_HASHED_PASSWORD"] != true {
-		t.Errorf("fields = %v", fields)
+
+	abuseIPDBFields, ok := fields["abuseipdb"].(logrus.Fields)
+	if !ok {
+		t.Fatalf(
+			"fields[abuseipdb] has type %T, want logrus.Fields",
+			fields["abuseipdb"],
+		)
 	}
-	for k, v := range fields {
+
+	if abuseIPDBFields["ABUSEIPDB_ENABLED"] != true ||
+		abuseIPDBFields["ABUSEIPDB_REPORT_HASHED_PASSWORD"] != true {
+		t.Errorf("abuseipdb fields = %v", abuseIPDBFields)
+	}
+
+	for k, v := range abuseIPDBFields {
 		if v == "k" {
 			t.Errorf("field %s leaks the API key", k)
 		}
 	}
+
 }
 
 func TestNewAbuseIPDBFromEnv_Overrides(t *testing.T) {
@@ -430,9 +443,17 @@ func TestNewAbuseIPDBFromEnv_Overrides(t *testing.T) {
 	if !b.reportClearUsername || !b.reportClearPassword || b.reportHashedPassword {
 		t.Errorf("flags wrong: %+v", b)
 	}
-	if fields["ABUSEIPDB_SSH_CATEGORIES"] != "18" || fields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] != true {
-		t.Errorf("fields = %v", fields)
+
+	abuseIPDBFields, ok := fields["abuseipdb"].(logrus.Fields)
+	if !ok {
+		t.Fatalf("fields[abuseipdb] = %T, want logrus.Fields", fields["abuseipdb"])
 	}
+
+	if abuseIPDBFields["ABUSEIPDB_SSH_CATEGORIES"] != "18" ||
+		abuseIPDBFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] != true {
+		t.Errorf("abuseipdb fields = %v", abuseIPDBFields)
+	}
+
 }
 
 func TestNewAbuseIPDBFromEnv_HashedOverridesClearPassword(t *testing.T) {
@@ -444,8 +465,16 @@ func TestNewAbuseIPDBFromEnv_HashedOverridesClearPassword(t *testing.T) {
 	if b.reportClearPassword || !b.reportHashedPassword {
 		t.Fatalf("hashed must override clear: clear=%v hashed=%v", b.reportClearPassword, b.reportHashedPassword)
 	}
-	if fields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] != false {
-		t.Errorf("startup log must show the effective clear-password value, got %v", fields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"])
+	abuseIPDBFields, ok := fields["abuseipdb"].(logrus.Fields)
+	if !ok {
+		t.Fatalf("fields[abuseipdb] = %T, want logrus.Fields", fields["abuseipdb"])
+	}
+
+	if abuseIPDBFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] != false {
+		t.Errorf(
+			"startup log must show the effective clear-password value, got %v",
+			abuseIPDBFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"],
+		)
 	}
 	if _, p := b.Sanitize("u", "secret"); p == "secret" {
 		t.Error("cleartext password would be transmitted")

@@ -335,10 +335,27 @@ func TestNewSpamhausFromEnv_Defaults(t *testing.T) {
 	if b.httpClient.Timeout != 10*time.Second || b.httpClient.CheckRedirect == nil {
 		t.Error("client needs a timeout and must block redirects")
 	}
-	if fields["SPAMHAUS_ENABLED"] != true || fields["SPAMHAUS_THREAT_TYPE"] != "attack" {
-		t.Errorf("fields = %v", fields)
+
+	// newSpamhausFromEnv() returns:
+	// map[string]any{
+	//     "spamhouse": map[string]any{...},
+	// }
+	wrapper, ok := asFields(fields)
+	if !ok {
+		t.Fatalf("fields = %T, want map[string]any", fields)
 	}
-	for k, v := range fields {
+
+	spamhausFields, ok := asFields(wrapper["spamhouse"])
+	if !ok {
+		t.Fatalf("fields[spamhouse] = %T, want map[string]any", wrapper["spamhouse"])
+	}
+
+	if spamhausFields["SPAMHAUS_ENABLED"] != true ||
+		spamhausFields["SPAMHAUS_THREAT_TYPE"] != "attack" {
+		t.Errorf("fields[spamhouse] = %v", spamhausFields)
+	}
+
+	for k, v := range spamhausFields {
 		if s, ok := v.(string); ok && strings.Contains(s, "TOPSECRET") {
 			t.Errorf("startup field %s leaks the API key", k)
 		}
@@ -411,12 +428,51 @@ func TestSpamhaus_EndToEndThroughManager(t *testing.T) {
 
 func TestSetup_SpamhausRegistered(t *testing.T) {
 	isolate(t)
-	m, fields := Setup(Options{Getenv: env("SPAMHAUS_ENABLED", "true", "SPAMHAUS_API_KEY", "k")})
+
+	m, fields := Setup(Options{
+		Getenv: env(
+			"SPAMHAUS_ENABLED", "true",
+			"SPAMHAUS_API_KEY", "k",
+		),
+	})
 	t.Cleanup(m.Stop)
+
 	if len(m.backends) != 1 || m.backends[0].Name() != "Spamhaus" {
 		t.Fatalf("backends = %v", m.backends)
 	}
-	if fields["SPAMHAUS_ENABLED"] != true || fields["ABUSE_REPORT_ATTEMPTS"] != 10 {
-		t.Errorf("fields = %v", fields)
+
+	// Setup() returns:
+	// map[string]any{
+	//     "abuse": map[string]any{
+	//         "ABUSE_REPORT_ATTEMPTS": 10,
+	//         ...
+	//         "spamhouse": map[string]any{...},
+	//     },
+	// }
+	root, ok := asFields(fields)
+	if !ok {
+		t.Fatalf("fields = %T, want map[string]any", fields)
+	}
+
+	abuseFields, ok := asFields(root["abuse"])
+	if !ok {
+		t.Fatalf("fields[abuse] = %T, want map[string]any", root["abuse"])
+	}
+
+	if abuseFields["ABUSE_REPORT_ATTEMPTS"] != 10 {
+		t.Errorf("shared startup fields = %v", abuseFields)
+	}
+
+	spamhausFields, ok := asFields(abuseFields["spamhouse"])
+	if !ok {
+		t.Fatalf(
+			"fields[abuse][spamhouse] = %T, want map[string]any",
+			abuseFields["spamhouse"],
+		)
+	}
+
+	if spamhausFields["SPAMHAUS_ENABLED"] != true ||
+		spamhausFields["SPAMHAUS_THREAT_TYPE"] != "attack" {
+		t.Errorf("backend startup fields = %v", spamhausFields)
 	}
 }

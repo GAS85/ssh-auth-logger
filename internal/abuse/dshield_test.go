@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -202,12 +203,17 @@ func TestDShield_ReportConvertsEntries(t *testing.T) {
 	b := newDShieldForTest(srv.URL, func(b *dshieldBackend) { b.batchSize = 1 })
 
 	ts := time.Date(2026, 1, 2, 5, 4, 5, 123456789, time.FixedZone("UTC+2", 2*3600))
-	b.Report(Report{IP: "203.0.113.7", Protocol: "SSH", Creds: []Credential{{Time: ts, Username: "root", Password: "toor"}}})
+	b.Report(Report{
+		IP:       "203.0.113.7",
+		Protocol: "SSH",
+		Creds:    []Credential{{Time: ts, Username: "root", Password: "toor"}},
+	})
 
 	reqs := srv.requests()
 	if len(reqs) != 1 || len(reqs[0].payload.Logs) != 1 {
 		t.Fatalf("requests = %d", len(reqs))
 	}
+
 	e := reqs[0].payload.Logs[0]
 	if e.Timestamp != "2026-01-02T03:04:05.123456Z" {
 		t.Errorf("timestamp = %q (must be UTC, microseconds, trailing Z)", e.Timestamp)
@@ -277,6 +283,7 @@ func TestDShield_ReportWithoutCredentialsStillQueuesNothing(t *testing.T) {
 func TestDShield_SubmitWireFormat(t *testing.T) {
 	srv := newDShieldServer(t)
 	b := newDShieldForTest(srv.URL)
+
 	userAgent = "wire-test/1.0"
 	t.Cleanup(func() { userAgent = "ssh-auth-logger" })
 
@@ -297,14 +304,19 @@ func TestDShield_SubmitWireFormat(t *testing.T) {
 		r.header.Get("X-ISC-LogType") != "cowrie" {
 		t.Errorf("headers = %v", r.header)
 	}
+
 	auth := r.header.Get("X-ISC-Authorization")
-	if !strings.HasPrefix(auth, "ISC-HMAC-SHA256 Credentials=") || !strings.Contains(auth, "Userid=12345") {
+	if !strings.HasPrefix(auth, "ISC-HMAC-SHA256 Credentials=") ||
+		!strings.Contains(auth, "Userid=12345") {
 		t.Errorf("auth header = %q", auth)
 	}
+
 	if r.payload.AuthHeader != auth {
 		t.Error("authheader in the body must equal the X-ISC-Authorization header")
 	}
-	if strings.Contains(string(r.raw), "secretkey") || strings.Contains(auth, "secretkey") {
+
+	if strings.Contains(string(r.raw), "secretkey") ||
+		strings.Contains(auth, "secretkey") {
 		t.Error("API key must never be transmitted")
 	}
 
@@ -312,19 +324,44 @@ func TestDShield_SubmitWireFormat(t *testing.T) {
 	if err := json.Unmarshal(r.raw, &generic); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(generic) != 3 || generic["type"] != "cowrie" {
 		t.Errorf("top-level keys = %v", generic)
 	}
-	logs := generic["logs"].([]any)
+
+	// Logs is now represented by the new log structure.
+	logs, ok := generic["logs"].([]any)
+	if !ok {
+		t.Fatalf("logs has type %T, want []any", generic["logs"])
+	}
+	if len(logs) != 1 {
+		t.Fatalf("logs has %d entries, want 1", len(logs))
+	}
+
+	logEntry, ok := logs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("log entry has type %T, want object", logs[0])
+	}
+
 	keys := map[string]bool{}
-	for k := range logs[0].(map[string]any) {
+	for k := range logEntry {
 		keys[k] = true
 	}
-	for _, want := range []string{"timestamp", "source_ip", "user", "password", "lastcommand", "hassh", "banner"} {
+
+	for _, want := range []string{
+		"timestamp",
+		"source_ip",
+		"user",
+		"password",
+		"lastcommand",
+		"hassh",
+		"banner",
+	} {
 		if !keys[want] {
 			t.Errorf("log entry lacks key %q", want)
 		}
 	}
+
 	if len(keys) != 7 {
 		t.Errorf("log entry has unexpected keys: %v", keys)
 	}
@@ -622,6 +659,7 @@ func TestNewDShieldFromEnv_DisabledByDefault(t *testing.T) {
 
 func TestNewDShieldFromEnv_Defaults(t *testing.T) {
 	useEnv(t, "DSHIELD_ENABLED", "true", "DSHIELD_USERID", "42", "DSHIELD_API_KEY", "TOPSECRET")
+
 	be, fields := newDShieldFromEnv()
 	b := be.(*dshieldBackend)
 	t.Cleanup(b.stop)
@@ -633,7 +671,8 @@ func TestNewDShieldFromEnv_Defaults(t *testing.T) {
 		t.Errorf("batch defaults = %d / %v", b.batchSize, b.flushEvery)
 	}
 	if !b.reportClearUsername || !b.reportClearPassword || b.reportHashedPassword {
-		t.Errorf("privacy defaults: user=%v pw=%v hashed=%v", b.reportClearUsername, b.reportClearPassword, b.reportHashedPassword)
+		t.Errorf("privacy defaults: user=%v pw=%v hashed=%v",
+			b.reportClearUsername, b.reportClearPassword, b.reportHashedPassword)
 	}
 	if b.debug || b.endpoint != dshieldSubmitURL {
 		t.Errorf("production endpoint expected, got debug=%v endpoint=%s", b.debug, b.endpoint)
@@ -641,26 +680,80 @@ func TestNewDShieldFromEnv_Defaults(t *testing.T) {
 	if b.httpClient.Timeout != 10*time.Second || b.httpClient.CheckRedirect == nil {
 		t.Error("http client must have a timeout and block redirects")
 	}
-	if fields["DSHIELD_USERID"] != "42" || fields["DSHIELD_BATCH_SIZE"] != 50 || fields["DSHIELD_BATCH_INTERVAL"] != "10m0s" {
-		t.Errorf("fields = %v", fields)
+
+	dshieldFields, ok := fields["dshield"].(logrus.Fields)
+	if !ok {
+		t.Fatalf("fields[dshield] = %T, want logrus.Fields", fields["dshield"])
 	}
-	for k, v := range fields {
-		if v == "TOPSECRET" {
-			t.Errorf("field %s leaks the API key", k)
+
+	if dshieldFields["DSHIELD_USERID"] != "42" ||
+		dshieldFields["DSHIELD_BATCH_SIZE"] != 50 ||
+		dshieldFields["DSHIELD_BATCH_INTERVAL"] != "10m0s" {
+		t.Errorf("dshield fields = %v", dshieldFields)
+	}
+
+	if dshieldFields["DSHIELD_DEBUG"] != false ||
+		dshieldFields["DSHIELD_ENABLED"] != true ||
+		dshieldFields["DSHIELD_REPORT_CLEAR_USERNAME"] != true ||
+		dshieldFields["DSHIELD_REPORT_CLEAR_PASSWORD"] != true ||
+		dshieldFields["DSHIELD_REPORT_HASHED_PASSWORD"] != false {
+		t.Errorf("dshield fields = %v", dshieldFields)
+	}
+
+	for k, v := range dshieldFields {
+		if s, ok := v.(string); ok &&
+			(s == "TOPSECRET" || s == "42") {
+			if s == "TOPSECRET" {
+				t.Errorf("field %s leaks the API key", k)
+			}
+		}
+	}
+}
+
+func TestNewDShieldFromEnv_MissingCredentialsAreFatal(t *testing.T) {
+	cases := [][]string{
+		{"DSHIELD_ENABLED", "true"},
+		{"DSHIELD_ENABLED", "true", "DSHIELD_USERID", "1"},
+		{"DSHIELD_ENABLED", "true", "DSHIELD_API_KEY", "k"},
+	}
+
+	for _, kv := range cases {
+		useEnv(t, kv...)
+		msg := expectFatal(t, func() { newDShieldFromEnv() })
+		if !strings.Contains(msg, "DSHIELD_USERID") ||
+			!strings.Contains(msg, "DSHIELD_API_KEY") {
+			t.Errorf("message %q", msg)
 		}
 	}
 }
 
 func TestNewDShieldFromEnv_DebugUsesDevEndpoint(t *testing.T) {
-	useEnv(t, "DSHIELD_ENABLED", "true", "DSHIELD_USERID", "1", "DSHIELD_API_KEY", "k", "DSHIELD_DEBUG", "true")
+	useEnv(t,
+		"DSHIELD_ENABLED", "true",
+		"DSHIELD_USERID", "1",
+		"DSHIELD_API_KEY", "k",
+		"DSHIELD_DEBUG", "true",
+	)
+
 	be, fields := newDShieldFromEnv()
 	b := be.(*dshieldBackend)
 	t.Cleanup(b.stop)
+
 	if !b.debug || b.endpoint != dshieldDebugSubmitURL {
 		t.Errorf("debug=%v endpoint=%s", b.debug, b.endpoint)
 	}
-	if !strings.Contains(b.endpoint, "devsubmitapi") || fields["DSHIELD_DEBUG"] != true {
-		t.Errorf("endpoint %s, fields %v", b.endpoint, fields)
+
+	dshieldFields, ok := fields["dshield"].(logrus.Fields)
+	if !ok {
+		t.Fatalf("fields[dshield] = %T, want logrus.Fields", fields["dshield"])
+	}
+
+	if dshieldFields["DSHIELD_DEBUG"] != true {
+		t.Errorf("DSHIELD_DEBUG = %v, want true", dshieldFields["DSHIELD_DEBUG"])
+	}
+
+	if dshieldFields["DSHIELD_ENABLED"] != true {
+		t.Errorf("DSHIELD_ENABLED = %v, want true", dshieldFields["DSHIELD_ENABLED"])
 	}
 }
 
@@ -677,17 +770,44 @@ func TestNewDShieldFromEnv_Overrides(t *testing.T) {
 }
 
 func TestNewDShieldFromEnv_HashedOverridesClearPassword(t *testing.T) {
-	useEnv(t, "DSHIELD_ENABLED", "true", "DSHIELD_USERID", "1", "DSHIELD_API_KEY", "k",
-		"DSHIELD_REPORT_HASHED_PASSWORD", "true") // CLEAR_PASSWORD defaults to true
+	useEnv(t,
+		"DSHIELD_ENABLED", "true",
+		"DSHIELD_USERID", "1",
+		"DSHIELD_API_KEY", "k",
+		"DSHIELD_REPORT_HASHED_PASSWORD", "true",
+	)
+
 	be, fields := newDShieldFromEnv()
 	b := be.(*dshieldBackend)
 	t.Cleanup(b.stop)
+
 	if b.reportClearPassword || !b.reportHashedPassword {
-		t.Fatalf("hashed must override clear: clear=%v hashed=%v", b.reportClearPassword, b.reportHashedPassword)
+		t.Fatalf(
+			"hashed must override clear: clear=%v hashed=%v",
+			b.reportClearPassword,
+			b.reportHashedPassword,
+		)
 	}
-	if fields["DSHIELD_REPORT_CLEAR_PASSWORD"] != false {
-		t.Errorf("startup log must show the effective value, got %v", fields["DSHIELD_REPORT_CLEAR_PASSWORD"])
+
+	dshieldFields, ok := fields["dshield"].(logrus.Fields)
+	if !ok {
+		t.Fatalf("fields[dshield] = %T, want logrus.Fields", fields["dshield"])
 	}
+
+	if dshieldFields["DSHIELD_REPORT_CLEAR_PASSWORD"] != false {
+		t.Errorf(
+			"startup log must show the effective value, got %v",
+			dshieldFields["DSHIELD_REPORT_CLEAR_PASSWORD"],
+		)
+	}
+
+	if dshieldFields["DSHIELD_REPORT_HASHED_PASSWORD"] != true {
+		t.Errorf(
+			"startup log must show the effective value, got %v",
+			dshieldFields["DSHIELD_REPORT_HASHED_PASSWORD"],
+		)
+	}
+
 	if _, p := b.Sanitize("u", "secret"); p == "secret" {
 		t.Error("cleartext password would be transmitted")
 	}
@@ -732,17 +852,31 @@ func TestDShield_StopEndsFlushLoopAndIsIdempotent(t *testing.T) {
 
 func TestDShield_SourceIPIsAlwaysADottedOrColonStringNeverANumber(t *testing.T) {
 	srv := newDShieldServer(t)
-	b := newDShieldForTest(srv.URL, func(b *dshieldBackend) { b.batchSize = 1 })
+	b := newDShieldForTest(srv.URL, func(b *dshieldBackend) {
+		b.batchSize = 1
+	})
 
-	for _, ip := range []string{"77.91.65.68", "192.0.2.1", "2001:db8::1"} {
-		b.Report(Report{IP: ip, Creds: []Credential{{Time: time.Now(), Username: "root"}}})
+	for _, ip := range []string{
+		"77.91.65.68",
+		"192.0.2.1",
+		"2001:db8::1",
+	} {
+		b.Report(Report{
+			IP:    ip,
+			Creds: []Credential{{Time: time.Now(), Username: "root"}},
+		})
 	}
 
 	reqs := srv.requests()
 	if len(reqs) != 3 {
 		t.Fatalf("requests = %d", len(reqs))
 	}
-	for i, ip := range []string{"77.91.65.68", "192.0.2.1", "2001:db8::1"} {
+
+	for i, ip := range []string{
+		"77.91.65.68",
+		"192.0.2.1",
+		"2001:db8::1",
+	} {
 		want := fmt.Sprintf(`"source_ip":%q`, ip)
 		if !strings.Contains(string(reqs[i].raw), want) {
 			t.Errorf("raw body lacks %s: %s", want, reqs[i].raw)
