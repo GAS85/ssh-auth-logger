@@ -11,7 +11,7 @@ COPY . .
 # Write version and build into the binary file.
 # '__none__' shall be longer than 8 symbols
 RUN sed -e "s/appVersion = \"dev\"/appVersion = \"$VERSION\"/" \
-        -e "s/appBuild = \"__none__\"/appBuild = \"$VCS_REF\"/" \
+        -e "s/__none__/$VCS_REF/" \
         -i main.go
 
 RUN go install . 
