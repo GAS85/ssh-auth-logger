@@ -5,18 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
+	"github.com/GAS85/ssh-auth-logger/internal/abuse"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -80,12 +75,6 @@ func (h *logHook) Levels() []logrus.Level { return logrus.AllLevels }
 func (h *logHook) Fire(e *logrus.Entry) error {
 	h.Entries = append(h.Entries, e)
 	return nil
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
 }
 
 // ── HashToInt64 ───────────────────────────────────────────────────────────────
@@ -1751,832 +1740,147 @@ func (m *mockErrorConn) Write(b []byte) (n int, err error) {
 	return 0, m.err
 }
 
-// ── truncateUTF8 tests ───────────────────────────────────────────────────────
+// ── Abuse reporting integration ──────────────────────────────────────────────
+//
+// The abuse package has its own tests. These check the seam in main.go: that the Telnet and SSH handlers hand the right data to abuseReporter.
 
-func TestTruncateUTF8_ShorterThanLimit(t *testing.T) {
-	got := truncateUTF8("hello", 100)
-	if got != "hello" {
-		t.Errorf("truncateUTF8() = %q, want unchanged %q", got, "hello")
-	}
+// chanBackend is an abuse.Backend that forwards every report to a channel.
+type chanBackend struct {
+	ch       chan abuse.Report
+	sanitize func(u, p string) (string, string)
 }
 
-func TestTruncateUTF8_ExactlyAtLimit(t *testing.T) {
-	s := "hello"
-	got := truncateUTF8(s, len(s))
-	if got != s {
-		t.Errorf("truncateUTF8() = %q, want unchanged %q", got, s)
+func (b *chanBackend) Name() string { return "test" }
+
+func (b *chanBackend) Sanitize(u, p string) (string, string) {
+	if b.sanitize != nil {
+		return b.sanitize(u, p)
 	}
+	return u, p
 }
 
-func TestTruncateUTF8_ASCIITruncation(t *testing.T) {
-	got := truncateUTF8("hello world", 5)
-	if got != "hello" {
-		t.Errorf("truncateUTF8() = %q, want %q", got, "hello")
-	}
-	if len(got) > 5 {
-		t.Errorf("truncateUTF8() returned %d bytes, want <= 5", len(got))
-	}
-}
+func (b *chanBackend) Report(r abuse.Report) { b.ch <- r }
 
-func TestTruncateUTF8_DoesNotSplitMultiByteRune(t *testing.T) {
-	// "café" is c(1) a(1) f(1) é(2 bytes in UTF-8) = 5 bytes total.
-	// Truncating to 4 bytes would land in the middle of 'é'.
-	s := "café"
-	if len(s) != 5 {
-		t.Fatalf("test fixture assumption broken: len(%q) = %d, want 5", s, len(s))
-	}
-
-	got := truncateUTF8(s, 4)
-
-	if !utf8.ValidString(got) {
-		t.Fatalf("truncateUTF8(%q, 4) = %q, not valid UTF-8", s, got)
-	}
-
-	// The dangling first byte of 'é' must have been dropped, leaving "caf".
-	if got != "caf" {
-		t.Errorf("truncateUTF8(%q, 4) = %q, want %q", s, got, "caf")
-	}
-}
-
-func TestTruncateUTF8_MultiByteRuneAtExactBoundary(t *testing.T) {
-	s := "café" // 5 bytes, 'é' occupies the last 2
-	got := truncateUTF8(s, 5)
-	if got != s {
-		t.Errorf("truncateUTF8() = %q, want unchanged %q", got, s)
-	}
-	if !utf8.ValidString(got) {
-		t.Fatalf("truncateUTF8() produced invalid UTF-8: %q", got)
-	}
-}
-
-func TestTruncateUTF8_EntireStringIsOneMultiByteRune(t *testing.T) {
-	// A single 3-byte rune truncated to fewer bytes than it needs
-	// should back off all the way to an empty string rather than
-	// return an invalid partial rune.
-	s := "€" // 3 bytes
-	got := truncateUTF8(s, 2)
-	if got != "" {
-		t.Errorf("truncateUTF8(%q, 2) = %q, want empty string", s, got)
-	}
-}
-
-func TestTruncateUTF8_ZeroMaxBytes(t *testing.T) {
-	got := truncateUTF8("hello", 0)
-	if got != "" {
-		t.Errorf("truncateUTF8() = %q, want empty string", got)
-	}
-}
-
-func TestTruncateUTF8_EmptyInput(t *testing.T) {
-	got := truncateUTF8("", 10)
-	if got != "" {
-		t.Errorf("truncateUTF8() = %q, want empty string", got)
-	}
-}
-
-// ── AbuseIPDB tests ──────────────────────────────────────────────────────────
-
-func newTestReporter(
-	attempts int,
-	reportEvery time.Duration,
-	reportClearUsername bool,
-	reportClearPassword bool,
-	rt http.RoundTripper,
-) *abuseIPDBReporter {
-	return newTestReporterWithPasswordMode(
-		attempts,
-		reportEvery,
-		reportClearUsername,
-		reportClearPassword,
-		false,
-		rt,
+// installReporter replaces the global abuseReporter with a Manager that reports to the returned channel as soon as `threshold` failures were seen.
+func installReporter(t *testing.T, threshold int, sanitize func(u, p string) (string, string)) <-chan abuse.Report {
+	t.Helper()
+	ch := make(chan abuse.Report, 16)
+	m := abuse.NewManager(
+		[]abuse.Backend{&chanBackend{ch: ch, sanitize: sanitize}},
+		threshold, time.Hour, time.Hour, time.Hour,
 	)
-}
-
-// newTestReporterWithPasswordMode is like newTestReporter but also lets tests
-// set reportHashedPassword, mirroring newAbuseIPDBReporter's precedence rule
-// (hashed overrides clear) instead of constructing the struct literal directly.
-func newTestReporterWithPasswordMode(
-	attempts int,
-	reportEvery time.Duration,
-	reportClearUsername bool,
-	reportClearPassword bool,
-	reportHashedPassword bool,
-	rt http.RoundTripper,
-) *abuseIPDBReporter {
-	return &abuseIPDBReporter{
-		enabled:              true,
-		apiKey:               "test-api-key",
-		attemptsLimit:        attempts,
-		reportEvery:          reportEvery,
-		sshCategories:        "18,22",
-		telnetCategories:     "14,18,23",
-		reportClearUsername:  reportClearUsername,
-		reportClearPassword:  reportClearPassword && !reportHashedPassword,
-		reportHashedPassword: reportHashedPassword,
-		httpClient: &http.Client{
-			Transport: rt,
-		},
-		ips: make(map[string]*abuseIPState),
-	}
-}
-
-func TestAbuseIPDBRecordFailureDisabled(t *testing.T) {
-	r := newTestReporter(
-		3,
-		time.Minute,
-		false,
-		false,
-		nil,
-	)
-
-	r.enabled = false
-
-	if got := r.RecordFailure(
-		"192.0.2.1",
-		"SSH",
-		"root",
-		"password",
-	); got {
-		t.Fatal("RecordFailure() = true for disabled reporter, want false")
-	}
-
-	if len(r.ips) != 0 {
-		t.Fatalf("disabled reporter created state: %+v", r.ips)
-	}
-}
-
-func TestAbuseIPDBRecordFailureInvalidIP(t *testing.T) {
-	r := newTestReporter(
-		3,
-		time.Minute,
-		false,
-		false,
-		nil,
-	)
-
-	if got := r.RecordFailure(
-		"not-an-ip",
-		"SSH",
-		"root",
-		"password",
-	); got {
-		t.Fatal("RecordFailure() = true for invalid IP, want false")
-	}
-
-	if len(r.ips) != 0 {
-		t.Fatalf("invalid IP created state: %+v", r.ips)
-	}
-}
-
-func TestAbuseIPDBThreshold(t *testing.T) {
-	var reports atomic.Int32
-
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		reports.Add(1)
-
-		return &http.Response{
-			StatusCode: 200,
-			Status:     "200 OK",
-			Body:       io.NopCloser(strings.NewReader(`{}`)),
-			Header:     make(http.Header),
-		}, nil
+	old := abuseReporter
+	abuseReporter = m
+	t.Cleanup(func() {
+		abuseReporter = old
+		m.Stop()
 	})
+	return ch
+}
 
-	r := newTestReporter(
-		3,
-		time.Hour,
-		false,
-		false,
-		rt,
-	)
-
-	ip := "192.0.2.10"
-
-	if r.RecordFailure(ip, "SSH", "root", "bad1") {
-		t.Fatal("first failure unexpectedly scheduled report")
-	}
-
-	if r.RecordFailure(ip, "SSH", "root", "bad2") {
-		t.Fatal("second failure unexpectedly scheduled report")
-	}
-
-	if !r.RecordFailure(ip, "SSH", "root", "bad3") {
-		t.Fatal("third failure did not schedule report")
-	}
-
-	// report() is asynchronous.
-	deadline := time.Now().Add(time.Second)
-	for reports.Load() != 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	if got := reports.Load(); got != 1 {
-		t.Fatalf("got %d reports, want 1", got)
-	}
-
-	r.mu.Lock()
-	state := r.ips[ip]
-	r.mu.Unlock()
-
-	if state.attempts != 0 {
-		t.Fatalf("attempts after report = %d, want 0", state.attempts)
-	}
-
-	if !state.lastReported.IsZero() {
-		// Expected.
-	} else {
-		t.Fatal("lastReported was not set after scheduling report")
+func waitReport(t *testing.T, ch <-chan abuse.Report) abuse.Report {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for an abuse report")
+		return abuse.Report{}
 	}
 }
 
-func TestAbuseIPDBCooldown(t *testing.T) {
-	var reports atomic.Int32
+func TestAbuse_TelnetFailureIsReported(t *testing.T) {
+	reports := installReporter(t, 1, nil)
 
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		reports.Add(1)
+	addr := startTelnetServer(t)
+	doTelnetLogin(t, addr, "admin", "hunter2")
 
-		return &http.Response{
-			StatusCode: 200,
-			Status:     "200 OK",
-			Body:       io.NopCloser(strings.NewReader(`{}`)),
-			Header:     make(http.Header),
-		}, nil
-	})
-
-	r := newTestReporter(
-		2,
-		time.Hour,
-		false,
-		false,
-		rt,
-	)
-
-	ip := "192.0.2.20"
-
-	r.RecordFailure(ip, "SSH", "root", "one")
-
-	if !r.RecordFailure(ip, "SSH", "root", "two") {
-		t.Fatal("second failure did not schedule report")
+	r := waitReport(t, reports)
+	if r.IP != "127.0.0.1" || r.Protocol != "Telnet" {
+		t.Errorf("report = %+v, want IP 127.0.0.1 protocol Telnet", r)
 	}
-
-	// While inside reportEvery, attempts must not accumulate.
-	if r.RecordFailure(ip, "SSH", "root", "three") {
-		t.Fatal("failure during cooldown unexpectedly scheduled report")
-	}
-
-	time.Sleep(20 * time.Millisecond)
-
-	if got := reports.Load(); got != 1 {
-		t.Fatalf("got %d reports, want 1", got)
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if got := r.ips[ip].attempts; got != 0 {
-		t.Fatalf("attempts during cooldown = %d, want 0", got)
+	if len(r.Creds) != 1 || r.Creds[0].Username != "admin" || r.Creds[0].Password != "hunter2" {
+		t.Errorf("creds = %+v", r.Creds)
 	}
 }
 
-func TestAbuseIPDBCollectsUniqueUsernamesAndPasswords(t *testing.T) {
-	r := newTestReporter(
-		10,
-		time.Hour,
-		true,
-		true,
-		nil,
-	)
+func TestAbuse_BackendSanitizeDecidesWhatIsReported(t *testing.T) {
+	// TELNET_LOG_CLEAR_PASSWORD only controls the local log. What a reporting service receives is decided solely by that backend's own Sanitize.
+	telnetLogClearPassword = false
+	defer func() { telnetLogClearPassword = true }()
 
-	ip := "192.0.2.30"
+	reports := installReporter(t, 1, func(u, _ string) (string, string) { return u, "" })
 
-	r.RecordFailure(ip, "SSH", "root", "password1")
-	r.RecordFailure(ip, "SSH", "root", "password1")
-	r.RecordFailure(ip, "SSH", "admin", "password2")
+	addr := startTelnetServer(t)
+	doTelnetLogin(t, addr, "root", "topsecret")
 
-	r.mu.Lock()
-	state := r.ips[ip]
-	r.mu.Unlock()
-
-	if len(state.usernames) != 2 {
-		t.Fatalf(
-			"usernames = %#v, want two unique usernames",
-			state.usernames,
-		)
+	r := waitReport(t, reports)
+	if len(r.Creds) != 1 || r.Creds[0].Username != "root" {
+		t.Fatalf("creds = %+v", r.Creds)
 	}
-
-	if len(state.passwords) != 2 {
-		t.Fatalf(
-			"passwords = %#v, want two unique passwords",
-			state.passwords,
-		)
-	}
-
-	if state.usernames[0] != "root" ||
-		state.usernames[1] != "admin" {
-		t.Fatalf("unexpected usernames: %#v", state.usernames)
-	}
-
-	if state.passwords[0] != "password1" ||
-		state.passwords[1] != "password2" {
-		t.Fatalf("unexpected passwords: %#v", state.passwords)
+	if r.Creds[0].Password != "" {
+		t.Errorf("backend asked for no passwords but received %q", r.Creds[0].Password)
 	}
 }
 
-func TestAbuseIPDBDoesNotCollectCredentialsWhenDisabled(t *testing.T) {
-	r := newTestReporter(
-		10,
-		time.Hour,
-		false,
-		false,
-		nil,
-	)
+func TestAbuse_SSHPasswordFailureIsReported(t *testing.T) {
+	reports := installReporter(t, 1, nil)
 
-	ip := "192.0.2.40"
-
-	r.RecordFailure(ip, "SSH", "root", "secret")
-
-	r.mu.Lock()
-	state := r.ips[ip]
-	r.mu.Unlock()
-
-	if len(state.usernames) != 0 {
-		t.Fatalf("usernames = %#v, want empty", state.usernames)
+	addr := startSSHServer(t)
+	if err := dialSSH(addr, sshClientCfg("sysadmin", ssh.Password("letmein"))); err == nil {
+		t.Fatal("honeypot must reject the login")
 	}
 
-	if len(state.passwords) != 0 {
-		t.Fatalf("passwords = %#v, want empty", state.passwords)
+	r := waitReport(t, reports)
+	if r.IP != "127.0.0.1" || r.Protocol != "SSH" {
+		t.Errorf("report = %+v", r)
+	}
+	if len(r.Creds) != 1 || r.Creds[0].Username != "sysadmin" || r.Creds[0].Password != "letmein" {
+		t.Errorf("creds = %+v", r.Creds)
 	}
 }
 
-func TestAbuseIPDBCollectsHashedPasswordInsteadOfClear(t *testing.T) {
-	r := newTestReporterWithPasswordMode(
-		10,
-		time.Hour,
-		false,
-		true, // reportClearPassword requested...
-		true, // ...but reportHashedPassword should take precedence
-		nil,
-	)
+func TestAbuse_SSHPublicKeyFailureIsReportedWithoutPassword(t *testing.T) {
+	reports := installReporter(t, 1, nil)
 
-	if r.reportClearPassword {
-		t.Fatal("reportClearPassword should be forced false when reportHashedPassword is true")
+	signer, err := getHostKeySigner("abuse-client", "ed25519")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := startSSHServer(t)
+	if err := dialSSH(addr, sshClientCfg("pentester", ssh.PublicKeys(signer))); err == nil {
+		t.Fatal("honeypot must reject the key")
 	}
 
-	ip := "192.0.2.41"
-
-	r.RecordFailure(ip, "SSH", "root", "secret")
-
-	r.mu.Lock()
-	state := r.ips[ip]
-	r.mu.Unlock()
-
-	if len(state.passwords) != 1 {
-		t.Fatalf("passwords = %#v, want exactly one hashed entry", state.passwords)
+	r := waitReport(t, reports)
+	if r.Protocol != "SSH" {
+		t.Errorf("protocol = %q, want SSH", r.Protocol)
 	}
-
-	wantHash := sha1Hex("secret")[:8]
-
-	if state.passwords[0] != wantHash {
-		t.Fatalf("password = %q, want SHA-1 hash %q", state.passwords[0], wantHash)
-	}
-
-	if state.passwords[0] == "secret" {
-		t.Fatal("cleartext password must not be stored when hashing is enabled")
+	if len(r.Creds) != 1 || r.Creds[0].Username != "pentester" || r.Creds[0].Password != "" {
+		t.Errorf("a public key attempt has a username but no password: %+v", r.Creds)
 	}
 }
 
-func TestAbuseIPDBHashedPasswordOverridesClearPassword(t *testing.T) {
-	r := newTestReporterWithPasswordMode(
-		10,
-		time.Hour,
-		false,
-		true,
-		true,
-		nil,
-	)
+func TestAbuse_BelowThresholdSendsNothing(t *testing.T) {
+	reports := installReporter(t, 5, nil)
 
-	ip := "192.0.2.42"
+	addr := startTelnetServer(t)
+	doTelnetLogin(t, addr, "u", "p")
 
-	r.RecordFailure(ip, "SSH", "root", "hunter2")
-
-	r.mu.Lock()
-	state := r.ips[ip]
-	r.mu.Unlock()
-
-	// Only the hash should be present; cleartext must never coexist with it.
-	if len(state.passwords) != 1 {
-		t.Fatalf("passwords = %#v, want exactly one entry", state.passwords)
-	}
-
-	for _, p := range state.passwords {
-		if p == "hunter2" {
-			t.Fatal("cleartext password leaked despite reportHashedPassword being set")
-		}
+	select {
+	case r := <-reports:
+		t.Fatalf("unexpected report below threshold: %+v", r)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
-func TestAbuseIPDBReportRequest(t *testing.T) {
-	var (
-		gotMethod      string
-		gotURL         string
-		gotAPIKey      string
-		gotContentType string
-		gotForm        url.Values
-	)
-
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		gotMethod = req.Method
-		gotURL = req.URL.String()
-		gotAPIKey = req.Header.Get("Key")
-		gotContentType = req.Header.Get("Content-Type")
-
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatalf("ReadAll() error = %v", err)
-		}
-
-		gotForm, err = url.ParseQuery(string(body))
-		if err != nil {
-			t.Fatalf("ParseQuery() error = %v", err)
-		}
-
-		return &http.Response{
-			StatusCode: 200,
-			Status:     "200 OK",
-			Body:       io.NopCloser(strings.NewReader(`{}`)),
-			Header:     make(http.Header),
-		}, nil
-	})
-
-	r := newTestReporter(
-		3,
-		time.Minute,
-		true,
-		true,
-		rt,
-	)
-
-	r.report(
-		"192.0.2.50",
-		"SSH",
-		[]string{"root", "admin"},
-		[]string{"password1", "password2"},
-	)
-
-	if gotMethod != http.MethodPost {
-		t.Fatalf("HTTP method = %q, want POST", gotMethod)
-	}
-
-	if gotURL != "https://api.abuseipdb.com/api/v2/report" {
-		t.Fatalf("URL = %q, want AbuseIPDB report endpoint", gotURL)
-	}
-
-	if gotAPIKey != "test-api-key" {
-		t.Fatalf("API key = %q, want test-api-key", gotAPIKey)
-	}
-
-	if gotContentType != "application/x-www-form-urlencoded" {
-		t.Fatalf(
-			"Content-Type = %q, want application/x-www-form-urlencoded",
-			gotContentType,
-		)
-	}
-
-	if got := gotForm.Get("ip"); got != "192.0.2.50" {
-		t.Fatalf("ip = %q, want 192.0.2.50", got)
-	}
-
-	if got := gotForm.Get("categories"); got != "18,22" {
-		t.Fatalf("categories = %q, want 18,22", got)
-	}
-
-	comment := gotForm.Get("comment")
-
-	if !strings.Contains(comment, "SSH authentication brute-force attempt") {
-		t.Fatalf("comment does not contain protocol/message: %q", comment)
-	}
-
-	if !strings.Contains(comment, `usernames=["root" "admin"]`) {
-		t.Fatalf("comment does not contain usernames: %q", comment)
-	}
-
-	if !strings.Contains(comment, `passwords=["password1" "password2"]`) {
-		t.Fatalf("comment does not contain passwords: %q", comment)
-	}
-
-	if got := gotForm.Get("timestamp"); got == "" {
-		t.Fatal("timestamp is empty")
-	}
-
-	if _, err := time.Parse(time.RFC3339, gotForm.Get("timestamp")); err != nil {
-		t.Fatalf("timestamp is not RFC3339: %q", gotForm.Get("timestamp"))
-	}
-}
-
-func TestAbuseIPDBReportUsesTelnetCategoriesForTelnetProtocol(t *testing.T) {
-	var gotForm url.Values
-
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatalf("ReadAll() error = %v", err)
-		}
-
-		gotForm, err = url.ParseQuery(string(body))
-		if err != nil {
-			t.Fatalf("ParseQuery() error = %v", err)
-		}
-
-		return &http.Response{
-			StatusCode: 200,
-			Status:     "200 OK",
-			Body:       io.NopCloser(strings.NewReader(`{}`)),
-			Header:     make(http.Header),
-		}, nil
-	})
-
-	r := newTestReporter(
-		3,
-		time.Minute,
-		false,
-		false,
-		rt,
-	)
-
-	r.report(
-		"192.0.2.65",
-		"Telnet",
-		nil,
-		nil,
-	)
-
-	if got := gotForm.Get("categories"); got != r.telnetCategories {
-		t.Fatalf("categories = %q, want telnetCategories %q", got, r.telnetCategories)
-	}
-
-	if got := gotForm.Get("categories"); got == r.sshCategories {
-		t.Fatalf("Telnet report used sshCategories %q instead of telnetCategories", got)
-	}
-}
-
-func TestAbuseIPDBReportSendsHashedPasswordNotCleartext(t *testing.T) {
-	var gotForm url.Values
-
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatalf("ReadAll() error = %v", err)
-		}
-
-		gotForm, err = url.ParseQuery(string(body))
-		if err != nil {
-			t.Fatalf("ParseQuery() error = %v", err)
-		}
-
-		return &http.Response{
-			StatusCode: 200,
-			Status:     "200 OK",
-			Body:       io.NopCloser(strings.NewReader(`{}`)),
-			Header:     make(http.Header),
-		}, nil
-	})
-
-	r := newTestReporterWithPasswordMode(
-		3,
-		time.Minute,
-		true,
-		true, // reportClearPassword requested...
-		true, // ...but reportHashedPassword should win
-		rt,
-	)
-
-	wantHash := sha1Hex("hunter2")
-
-	r.report(
-		"192.0.2.66",
-		"SSH",
-		[]string{"root"},
-		[]string{wantHash}, // report() receives whatever RecordFailure already collected
-	)
-
-	comment := gotForm.Get("comment")
-
-	if strings.Contains(comment, "hunter2") {
-		t.Fatalf("comment leaked cleartext password: %q", comment)
-	}
-
-	if !strings.Contains(comment, "passwords sha1 prefix=") {
-		t.Fatalf("comment missing passwords sha1 prefix field: %q", comment)
-	}
-
-	if !strings.Contains(comment, wantHash) {
-		t.Fatalf("comment does not contain expected hash %q: %q", wantHash, comment)
-	}
-}
-
-func TestAbuseIPDBReportDoesNotIncludeCredentialsWhenDisabled(t *testing.T) {
-	var gotForm url.Values
-
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatalf("ReadAll() error = %v", err)
-		}
-
-		gotForm, err = url.ParseQuery(string(body))
-		if err != nil {
-			t.Fatalf("ParseQuery() error = %v", err)
-		}
-
-		return &http.Response{
-			StatusCode: 200,
-			Status:     "200 OK",
-			Body:       io.NopCloser(strings.NewReader(`{}`)),
-			Header:     make(http.Header),
-		}, nil
-	})
-
-	r := newTestReporter(
-		3,
-		time.Minute,
-		false,
-		false,
-		rt,
-	)
-
-	r.report(
-		"192.0.2.60",
-		"Telnet",
-		[]string{"root"},
-		[]string{"secret"},
-	)
-
-	comment := gotForm.Get("comment")
-
-	if strings.Contains(comment, "root") {
-		t.Fatalf("comment leaked username: %q", comment)
-	}
-
-	if strings.Contains(comment, "secret") {
-		t.Fatalf("comment leaked password: %q", comment)
-	}
-
-	if !strings.Contains(comment, "Telnet authentication brute-force attempt") {
-		t.Fatalf("comment missing protocol: %q", comment)
-	}
-}
-
-func TestAbuseIPDBReportHTTPErrorDoesNotPanic(t *testing.T) {
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return nil, io.ErrUnexpectedEOF
-	})
-
-	r := newTestReporter(
-		3,
-		time.Minute,
-		false,
-		false,
-		rt,
-	)
-
-	// report() should handle the error internally.
-	r.report(
-		"192.0.2.70",
-		"SSH",
-		nil,
-		nil,
-	)
-}
-
-func TestAbuseIPDBReportRejectedStatusDoesNotPanic(t *testing.T) {
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: 429,
-			Status:     "429 Too Many Requests",
-			Body:       io.NopCloser(strings.NewReader(`rate limited`)),
-			Header:     make(http.Header),
-		}, nil
-	})
-
-	r := newTestReporter(
-		3,
-		time.Minute,
-		false,
-		false,
-		rt,
-	)
-
-	r.report(
-		"192.0.2.80",
-		"SSH",
-		nil,
-		nil,
-	)
-}
-
-func TestAbuseIPDBConcurrentThresholdOnlyReportsOnce(t *testing.T) {
-	var reports atomic.Int32
-
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		reports.Add(1)
-
-		return &http.Response{
-			StatusCode: 200,
-			Status:     "200 OK",
-			Body:       io.NopCloser(strings.NewReader(`{}`)),
-			Header:     make(http.Header),
-		}, nil
-	})
-
-	const threshold = 10
-	const goroutines = 100
-
-	r := newTestReporter(
-		threshold,
-		time.Hour,
-		false,
-		false,
-		rt,
-	)
-
-	ip := "192.0.2.90"
-
-	var wg sync.WaitGroup
-	wg.Add(goroutines)
-
-	for i := 0; i < goroutines; i++ {
-		go func() {
-			defer wg.Done()
-
-			r.RecordFailure(
-				ip,
-				"SSH",
-				"root",
-				"password",
-			)
-		}()
-	}
-
-	wg.Wait()
-
-	// Wait for asynchronous report.
-	deadline := time.Now().Add(time.Second)
-	for reports.Load() != 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	if got := reports.Load(); got != 1 {
-		t.Fatalf(
-			"concurrent failures caused %d reports, want exactly 1",
-			got,
-		)
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if got := r.ips[ip].attempts; got != 0 {
-		t.Fatalf("attempts = %d after report, want 0", got)
-	}
-}
-
-func TestAbuseIPDBCleanup(t *testing.T) {
-	r := newTestReporter(
-		10,
-		time.Hour,
-		false,
-		false,
-		nil,
-	)
-
-	now := time.Now()
-
-	r.ips["192.0.2.100"] = &abuseIPState{
-		lastSeen: now.Add(-2 * time.Hour),
-	}
-
-	r.ips["192.0.2.101"] = &abuseIPState{
-		lastSeen: now.Add(-10 * time.Minute),
-	}
-
-	// Use a short expiry for the test by directly applying the cleanup
-	// logic equivalent to cleanupLoop's configured expiry.
-	r.mu.Lock()
-
-	for ip, state := range r.ips {
-		if now.Sub(state.lastSeen) > time.Hour {
-			delete(r.ips, ip)
-		}
-	}
-
-	r.mu.Unlock()
-
-	if _, exists := r.ips["192.0.2.100"]; exists {
-		t.Fatal("expired IP was not removed")
-	}
-
-	if _, exists := r.ips["192.0.2.101"]; !exists {
-		t.Fatal("active IP was incorrectly removed")
+func TestAbuse_NilReporterDoesNotBreakHandlers(t *testing.T) {
+	old := abuseReporter
+	abuseReporter = nil
+	defer func() { abuseReporter = old }()
+
+	addr := startTelnetServer(t)
+	if resp := doTelnetLogin(t, addr, "u", "p"); !strings.Contains(resp, "incorrect") {
+		t.Errorf("handler must still answer when no reporter is configured, got %q", resp)
 	}
 }

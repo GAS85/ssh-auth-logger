@@ -123,6 +123,10 @@ jobs:
         run: |
           mkdir -p dist
 
+          sed -e "s/appVersion = \"dev\"/appVersion = \"$VERSION\"/" \
+              -e "s/appBuild = \"__none__\"/appBuild = \"$VCS_REF\"/" \
+              -i main.go
+
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
             go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${VCS_REF}" \
             -o dist/ssh-auth-logger-${VERSION}-linux-amd64 .

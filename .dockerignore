@@ -1,5 +1,6 @@
 .git
 .github
+.env
 README.md
 Dockerfile
 *_test.go

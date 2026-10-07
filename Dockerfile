@@ -1,12 +1,18 @@
 FROM golang:alpine AS builder
 
 ARG VERSION=dev
-ARG VCS_REF=dev
+ARG VCS_REF=__none__
 ARG BUILD_DATE=unknown
 
 WORKDIR /app
 
 COPY . .
+
+# Write version and build into the binary file.
+# '__none__' shall be longer than 8 symbols
+RUN sed -e "s/appVersion = \"dev\"/appVersion = \"$VERSION\"/" \
+        -e "s/appBuild = \"__none__\"/appBuild = \"$VCS_REF\"/" \
+        -i main.go
 
 RUN go install . 
 
@@ -30,6 +36,7 @@ LABEL maintainer="$LABEL_MAINTAINER" \
       org.opencontainers.image.version=$VERSION
 
 ENV VERSION=$VERSION
+ENV COMMIT=$VCS_REF
 ENV USER=nobody
 ENV SSHD_BIND=:2222
 ENV TELNET_BIND=:2323
@@ -46,7 +53,7 @@ COPY --from=builder /go/bin/ssh-auth-logger /go/bin/ssh-auth-logger
 
 RUN touch /var/log/ssh-auth-logger.log && \
     chown $USER /var/log/ssh-auth-logger.log && \
-    chmod 644 /var/log/ssh-auth-logger.log
+    chmod 640 /var/log/ssh-auth-logger.log
 
 USER $USER
 
@@ -57,6 +64,6 @@ HEALTHCHECK \
     --timeout=5s \
     --retries=1 \
     --start-period=5s \
-    CMD ["sh", "-c", "pgrep ssh-auth-logger && test -s /var/log/ssh-auth-logger.log || exit 1"]
+    CMD ["sh", "-c", "pgrep ssh-auth-logger"]
 
-CMD ["/bin/sh", "-c", "test -f /var/log/ssh-auth-logger.log || { echo 'Creating log file...' && touch /var/log/ssh-auth-logger.log; }; /go/bin/ssh-auth-logger 2>&1 | tee -a /var/log/ssh-auth-logger.log"]
+CMD ["/bin/sh", "-c", "/go/bin/ssh-auth-logger"]
