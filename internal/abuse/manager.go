@@ -88,6 +88,33 @@ type Backend interface {
 	Report(rep Report)
 }
 
+// Reputation is what a reputation service knows about an IP.
+type Reputation struct {
+	CountryCode          string // ISO 3166 alpha-2 code, empty if unknown
+	AbuseConfidenceScore int    // 0-100
+	TotalReports         int
+}
+
+// ReputationChecker is optionally implemented by a Backend that can look up the reputation of an IP. The Manager only uses it if ReputationCheckEnabled returns true.
+type ReputationChecker interface {
+	// ReputationCheckEnabled reports whether lookups were switched on in the configuration.
+	ReputationCheckEnabled() bool
+
+	// LookupReputation queries the service. It may block on network I/O: the Manager always calls it in its own goroutine.
+	LookupReputation(ip string) (Reputation, error)
+}
+
+// reputationRetryAfter is how long a failed lookup is remembered, so a broken or rate-limited API is not hit again for every new connection. It never exceeds the state expiry.
+const reputationRetryAfter = 5 * time.Minute
+
+// reputationEntry is one cached lookup result (or failure) for an IP.
+type reputationEntry struct {
+	pending bool // lookup in flight, nothing to show yet
+	ok      bool // lookup succeeded, rep is valid
+	rep     Reputation
+	expires time.Time
+}
+
 // abuseIPState contains reporting state for one source IP.
 type abuseIPState struct {
 	attempts     int
@@ -110,6 +137,11 @@ type Manager struct {
 
 	ips map[string]*abuseIPState
 
+	// IP reputation lookups. checker is nil if no backend offers (or enables) them. repMu is separate from mu so lookups never contend with failure counting; never take mu while holding repMu.
+	checker ReputationChecker
+	repMu   sync.Mutex
+	rep     map[string]*reputationEntry
+
 	done     chan struct{} // closed by Stop
 	loopDone chan struct{} // closed when cleanupLoop has exited (nil if no loop was started)
 	stopOnce sync.Once
@@ -130,7 +162,15 @@ func NewManager(
 		cleanupEvery:  cleanupEvery,
 		stateExpiry:   stateExpiry,
 		ips:           make(map[string]*abuseIPState),
+		rep:           make(map[string]*reputationEntry),
 		done:          make(chan struct{}),
+	}
+
+	for _, b := range backends {
+		if rc, ok := b.(ReputationChecker); ok && rc.ReputationCheckEnabled() {
+			m.checker = rc
+			break
+		}
 	}
 
 	if len(backends) > 0 {
@@ -233,6 +273,93 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 	return true
 }
 
+// ReputationFields returns the cached IP reputation as log fields (countryCode, abuseConfidenceScore, totalReports), or nil if there is nothing to show.
+//
+// It never blocks on the network. The first time an IP is seen (and again after its cache entry has expired) a lookup is started in the background and nil is returned; once the lookup has finished, every call returns the cached data until it expires after ABUSE_STATE_EXPIRY. A failed lookup is remembered for a few minutes so it is not repeated for every connection.
+func (m *Manager) ReputationFields(ip string) logrus.Fields {
+	if m == nil || m.checker == nil || net.ParseIP(ip) == nil {
+		return nil
+	}
+
+	now := time.Now()
+
+	m.repMu.Lock()
+	e, exists := m.rep[ip]
+	if exists && (e.pending || now.Before(e.expires)) {
+		rep, ok := e.rep, e.ok
+		m.repMu.Unlock()
+		if !ok {
+			return nil
+		}
+		return reputationLogFields(rep)
+	}
+
+	// Unknown or expired: claim the lookup before releasing the lock, so concurrent connections from the same IP start only one request.
+	m.rep[ip] = &reputationEntry{pending: true}
+	m.repMu.Unlock()
+
+	go m.lookupReputation(ip)
+
+	return nil
+}
+
+// lookupReputation performs one lookup and stores the outcome.
+func (m *Manager) lookupReputation(ip string) {
+	rep, err := m.checker.LookupReputation(ip)
+
+	entry := &reputationEntry{}
+	if err != nil {
+		// The backend has already logged the details.
+		retry := reputationRetryAfter
+		if m.stateExpiry < retry {
+			retry = m.stateExpiry
+		}
+		entry.expires = time.Now().Add(retry)
+	} else {
+		entry.ok = true
+		entry.rep = rep
+		entry.expires = time.Now().Add(m.stateExpiry)
+	}
+
+	m.repMu.Lock()
+	m.rep[ip] = entry
+	m.repMu.Unlock()
+}
+
+// reputationLogFields converts a Reputation to log fields.
+func reputationLogFields(r Reputation) logrus.Fields {
+	country := r.CountryCode
+	if country == "" {
+		country = "N/A"
+	}
+	return logrus.Fields{
+		"countryCode":          country,
+		"abuseConfidenceScore": r.AbuseConfidenceScore,
+		"totalReports":         r.TotalReports,
+	}
+}
+
+// cleanupReputation drops expired reputation entries (in-flight lookups are kept).
+func (m *Manager) cleanupReputation(now time.Time) {
+	m.repMu.Lock()
+	defer m.repMu.Unlock()
+
+	removed := 0
+	for ip, e := range m.rep {
+		if !e.pending && !now.Before(e.expires) {
+			delete(m.rep, ip)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		logger.WithFields(logrus.Fields{
+			"removed":   removed,
+			"remaining": len(m.rep),
+		}).Debug("Abuse: expired IP reputation entries purged")
+	}
+}
+
 // addCredential appends c unless the same username/password pair is already present or the per-window cap has been reached.
 func addCredential(list []Credential, c Credential) []Credential {
 	for _, existing := range list {
@@ -257,6 +384,7 @@ func (m *Manager) cleanupLoop() {
 		select {
 		case <-ticker.C:
 			m.cleanup()
+			m.cleanupReputation(time.Now())
 		case <-m.done:
 			return
 		}

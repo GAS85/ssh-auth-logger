@@ -159,11 +159,21 @@ func resolveProfileKey(scope string, conn net.Conn) string {
 	return getHost(conn.LocalAddr().String())
 }
 
+// withReputation adds the cached IP reputation (countryCode, abuseConfidenceScore, totalReports) of the source IP to fields. It never blocks: on first sight of an IP, or if the data is not available, nothing is added.
+func withReputation(fields logrus.Fields) logrus.Fields {
+	if src, ok := fields["src"].(string); ok {
+		for k, v := range abuseReporter.ReputationFields(src) {
+			fields[k] = v
+		}
+	}
+	return fields
+}
+
 // Telnet handler
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
 
-	logger.WithFields(connLogParameters(conn)).
+	logger.WithFields(withReputation(connLogParameters(conn))).
 		WithField("destinationServicename", "telnetd").
 		Info("Telnet connection")
 
@@ -1009,7 +1019,7 @@ func main() {
 				continue
 			}
 
-			logger.WithFields(connLogParameters(conn)).Info("SSH connection")
+			logger.WithFields(withReputation(connLogParameters(conn))).Info("SSH connection")
 
 			limitedConn := newRateLimitedConn(conn, rate)
 			config := makeSSHConfig(conn)

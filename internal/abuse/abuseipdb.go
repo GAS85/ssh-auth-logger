@@ -2,11 +2,15 @@ package abuse
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -14,6 +18,18 @@ import (
 
 // Maximum comment length (bytes) https://www.abuseipdb.com/api.html
 const abuseIPDBMaxCommentLen = 1024
+
+const (
+	// Only reports newer than this many days count for the confidence score (API default and maximum used by the web UI).
+	abuseIPDBCheckMaxAgeDays = 30
+
+	// Pause of reputation lookups after HTTP 429 if the response has no usable Retry-After header, and the longest pause honoured.
+	abuseIPDBDefaultPause = 15 * time.Minute
+	abuseIPDBMaxPause     = 24 * time.Hour
+)
+
+// errAbuseIPDBPaused is returned by LookupReputation while the API quota is exhausted.
+var errAbuseIPDBPaused = errors.New("AbuseIPDB: reputation checks paused after rate limit")
 
 // abuseIPDBBackend reports abusive IPs to https://www.abuseipdb.com
 type abuseIPDBBackend struct {
@@ -26,7 +42,14 @@ type abuseIPDBBackend struct {
 	reportClearPassword  bool
 	reportHashedPassword bool
 
+	// checkIP enables reputation lookups for connecting IPs (ABUSEIPDB_IP_CHECK).
+	checkIP bool
+
 	httpClient *http.Client
+
+	// Lookups are suspended until pausedUntil after the API answered 429.
+	pauseMu     sync.Mutex
+	pausedUntil time.Time
 }
 
 // newAbuseIPDBFromEnv builds the AbuseIPDB backend from ABUSEIPDB_* variables. Returns (nil, nil) if ABUSEIPDB_ENABLED is not set.
@@ -49,6 +72,8 @@ func newAbuseIPDBFromEnv() (Backend, logrus.Fields) {
 	clearPassword := envBool("ABUSEIPDB_REPORT_CLEAR_PASSWORD", "false")
 	// ABUSEIPDB_REPORT_HASHED_PASSWORD overrides ABUSEIPDB_REPORT_CLEAR_PASSWORD when enabled, SHA-1 hashes are reported instead of cleartext passwords.
 	hashedPassword := envBool("ABUSEIPDB_REPORT_HASHED_PASSWORD", "true")
+	// Look up the reputation of every connecting IP (country, confidence score, total reports) and add it to the connection log.
+	checkIP := envBool("ABUSEIPDB_IP_CHECK", "false")
 
 	b := &abuseIPDBBackend{
 		apiKey:           apiKey,
@@ -59,6 +84,8 @@ func newAbuseIPDBFromEnv() (Backend, logrus.Fields) {
 		// reportHashedPassword takes precedence over reportClearPassword. If both are set, cleartext passwords are never collected or sent
 		reportClearPassword:  clearPassword && !hashedPassword,
 		reportHashedPassword: hashedPassword,
+
+		checkIP: checkIP,
 
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
@@ -71,6 +98,7 @@ func newAbuseIPDBFromEnv() (Backend, logrus.Fields) {
 			"ABUSEIPDB_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
 			"ABUSEIPDB_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
 			"ABUSEIPDB_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
+			"ABUSEIPDB_IP_CHECK":               b.checkIP,
 		},
 	}
 }
@@ -194,4 +222,94 @@ func (b *abuseIPDBBackend) Report(rep Report) {
 		"ip":       ip,
 		"protocol": protocol,
 	}).Infof("AbuseIPDB: IP %s reported", ip)
+}
+
+// ReputationCheckEnabled implements ReputationChecker.
+func (b *abuseIPDBBackend) ReputationCheckEnabled() bool { return b.checkIP }
+
+// LookupReputation implements ReputationChecker: it calls the AbuseIPDB CHECK endpoint https://docs.abuseipdb.com/#check-endpoint
+// Errors are logged here; the caller only needs to know that there is no data.
+func (b *abuseIPDBBackend) LookupReputation(ip string) (Reputation, error) {
+	if b.isPaused() {
+		return Reputation{}, errAbuseIPDBPaused
+	}
+
+	q := url.Values{}
+	q.Set("ipAddress", ip)
+	q.Set("maxAgeInDays", strconv.Itoa(abuseIPDBCheckMaxAgeDays))
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.abuseipdb.com/api/v2/check?"+q.Encode(), nil)
+	if err != nil {
+		logger.WithError(err).WithField("ip", ip).Error("AbuseIPDB: failed to create check request")
+		return Reputation{}, err
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Key", b.apiKey)
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		logger.WithError(err).WithField("ip", ip).Error("AbuseIPDB: check request failed")
+		return Reputation{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+
+		fields := logrus.Fields{
+			"ip":     ip,
+			"status": resp.Status,
+			"body":   string(body),
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			pause := b.pauseFor(resp.Header.Get("Retry-After"))
+			fields["paused_for"] = pause.String()
+		}
+		logger.WithFields(fields).Warnf("AbuseIPDB: reputation check rejected for %s", ip)
+
+		return Reputation{}, fmt.Errorf("AbuseIPDB: check rejected: %s", resp.Status)
+	}
+
+	var payload struct {
+		Data struct {
+			CountryCode          string `json:"countryCode"`
+			AbuseConfidenceScore int    `json:"abuseConfidenceScore"`
+			TotalReports         int    `json:"totalReports"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
+		logger.WithError(err).WithField("ip", ip).Error("AbuseIPDB: invalid check response")
+		return Reputation{}, err
+	}
+
+	return Reputation{
+		CountryCode:          payload.Data.CountryCode,
+		AbuseConfidenceScore: payload.Data.AbuseConfidenceScore,
+		TotalReports:         payload.Data.TotalReports,
+	}, nil
+}
+
+// isPaused reports whether lookups are suspended because of a rate limit.
+func (b *abuseIPDBBackend) isPaused() bool {
+	b.pauseMu.Lock()
+	defer b.pauseMu.Unlock()
+	return time.Now().Before(b.pausedUntil)
+}
+
+// pauseFor suspends lookups after HTTP 429, for the duration in the Retry-After header (seconds) if present, else a default, and returns it.
+func (b *abuseIPDBBackend) pauseFor(retryAfter string) time.Duration {
+	pause := abuseIPDBDefaultPause
+	if secs, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && secs > 0 {
+		pause = time.Duration(secs) * time.Second
+	}
+	if pause > abuseIPDBMaxPause {
+		pause = abuseIPDBMaxPause
+	}
+
+	b.pauseMu.Lock()
+	b.pausedUntil = time.Now().Add(pause)
+	b.pauseMu.Unlock()
+
+	return pause
 }

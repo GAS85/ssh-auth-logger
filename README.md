@@ -160,7 +160,7 @@ services:
 
       #- LOG_TO=consol                              # You can set to "console" (the default), "file" or "both".
       #- LOG_FILE_PATH=/var/log/ssh-auth-logger.log # Specify log file path inside of container
-      #- LOG_FILTER=""                              # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product"
+      #- LOG_FILTER=""                              # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product,countryCode,abuseConfidenceScore,totalReports"
 
       # SSHD Part
 
@@ -287,6 +287,7 @@ This part is optional, you can skip it and use defaults listed here.
       - ABUSEIPDB_REPORT_CLEAR_USERNAME=false # Report User names to AbuseIPDB in a clear text
       - ABUSEIPDB_REPORT_HASHED_PASSWORD=true # Report hashed Passwords to AbuseIPDB
       - ABUSEIPDB_REPORT_CLEAR_PASSWORD=false # Report Passwords to AbuseIPDB in a clear text. It is strongly recommended to use ABUSEIPDB_REPORT_HASHED_PASSWORD instead. Works only when report of hashed password is disabled
+      - ABUSEIPDB_IP_CHECK=false              # Enable IP Reputation check and show it in logs in future connection attempt.
 ```
 
 #### Blocklist Reporting part
