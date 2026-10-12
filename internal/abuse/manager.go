@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -142,6 +143,10 @@ type Manager struct {
 	repMu   sync.Mutex
 	rep     map[string]*reputationEntry
 
+	// Report statistics. reportsTriggered counts threshold events (one per IP report); sent counts the dispatches to each backend (same index as backends). A dispatch is the hand-over to the backend, not a confirmed delivery: Backend.Report has no result.
+	reportsTriggered atomic.Uint64
+	sent             []atomic.Uint64
+
 	done     chan struct{} // closed by Stop
 	loopDone chan struct{} // closed when cleanupLoop has exited (nil if no loop was started)
 	stopOnce sync.Once
@@ -163,6 +168,7 @@ func NewManager(
 		stateExpiry:   stateExpiry,
 		ips:           make(map[string]*abuseIPState),
 		rep:           make(map[string]*reputationEntry),
+		sent:          make([]atomic.Uint64, len(backends)),
 		done:          make(chan struct{}),
 	}
 
@@ -179,6 +185,31 @@ func NewManager(
 	}
 
 	return m
+}
+
+// Stats is a snapshot of the reporting counters since the Manager was created.
+type Stats struct {
+	// ReportsTriggered is the number of times the attempt threshold was reached, i.e. how many IP reports were started.
+	ReportsTriggered uint64
+	// ReportsSent is the total number of reports handed to backends (one per triggered report and enabled backend).
+	ReportsSent uint64
+	// SentByBackend is the same per backend name.
+	SentByBackend map[string]uint64
+}
+
+// Stats returns the current reporting counters. It is safe for concurrent use and on a nil Manager. Reports are counted when dispatched; a backend may still fail or hold them in a batch that is not flushed.
+func (m *Manager) Stats() Stats {
+	st := Stats{SentByBackend: map[string]uint64{}}
+	if m == nil {
+		return st
+	}
+	st.ReportsTriggered = m.reportsTriggered.Load()
+	for i, b := range m.backends {
+		n := m.sent[i].Load()
+		st.ReportsSent += n
+		st.SentByBackend[b.Name()] += n
+	}
+	return st
 }
 
 // Stop ends the background cleanup goroutine and waits for it to exit.
@@ -266,7 +297,9 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 		"backends": strings.Join(names, ","),
 	}).Infof("Abuse: report threshold reached for %s. Report IP.", ip)
 
+	m.reportsTriggered.Add(1)
 	for i, b := range m.backends {
+		m.sent[i].Add(1)
 		go b.Report(Report{IP: ip, Protocol: protocol, Creds: snapshots[i]})
 	}
 

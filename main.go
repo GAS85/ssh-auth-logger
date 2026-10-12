@@ -101,6 +101,9 @@ var hostKeys *hostKeyCache
 // abuseReporter is the single entry point used by the SSH and Telnet handlers.
 var abuseReporter *abuse.Manager
 
+// logDest holds the log writers chosen with LOG_TO; the shutdown statistics go to logDest.Startup (console, plus the file if one is used).
+var logDest *logOutputs
+
 // TTL-aware cache for a host key
 func newHostKeyCache(ttl, cleanupEvery time.Duration) *hostKeyCache {
 	c := &hostKeyCache{
@@ -173,6 +176,7 @@ func withReputation(fields logrus.Fields) logrus.Fields {
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
 
+	stats.telnetConnections.Add(1)
 	logger.WithFields(withReputation(connLogParameters(conn))).
 		WithField("destinationServicename", "telnetd").
 		Info("Telnet connection")
@@ -218,6 +222,7 @@ func handleTelnetConnection(conn net.Conn) {
 	fields["password"] = loggedPassword
 	fields["protocol"] = "telnet"
 
+	stats.telnetPasswords.Add(1)
 	logger.WithFields(fields).
 		WithField("destinationServicename", "telnetd").
 		Info("Telnet login attempt")
@@ -677,6 +682,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 				loggedPassword = string(password)
 			}
 
+			stats.sshPasswords.Add(1)
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
 					"password":        loggedPassword,
@@ -704,6 +710,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
 			time.Sleep(base + jitter)
 
+			stats.sshKeys.Add(1)
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
 					"keytype":         key.Type(),
@@ -876,6 +883,7 @@ func init() {
 	if err != nil {
 		logrus.Fatal(err)
 	}
+	logDest = logOut
 	logrus.SetOutput(logOut.Startup)
 
 	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
@@ -1019,6 +1027,7 @@ func main() {
 				continue
 			}
 
+			stats.sshConnections.Add(1)
 			logger.WithFields(withReputation(connLogParameters(conn))).Info("SSH connection")
 
 			limitedConn := newRateLimitedConn(conn, rate)
@@ -1044,6 +1053,6 @@ func main() {
 		}
 	}()
 
-	// Block forever
-	select {}
+	// Block until SIGTERM/SIGINT, then log the run statistics and exit.
+	handleShutdown(notifyShutdown(), logDest.Startup, stats, abuseReporter, os.Exit)
 }
