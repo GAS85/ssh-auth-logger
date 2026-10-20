@@ -101,6 +101,9 @@ var abuseReporter *abuse.Manager
 // logDest holds the log writers chosen with LOG_TO; the shutdown statistics go to logDest.Startup (console, plus the file if one is used).
 var logDest *common.LogOutputs
 
+// statsBind and statsToken configure the optional REST statistics endpoint.
+var statsBind, statsToken string
+
 // stats is updated by the SSH and Telnet handlers and logged on shutdown.
 var stats = common.NewStats()
 
@@ -175,6 +178,9 @@ func withReputation(fields logrus.Fields) logrus.Fields {
 // Telnet handler
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
+
+	stats.OpenTelnet.Add(1)
+	defer stats.OpenTelnet.Add(-1)
 
 	stats.TelnetConnections.Add(1)
 	logger.WithFields(withReputation(connLogParameters(conn))).
@@ -788,10 +794,27 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	return config
 }
 
-func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
+// serveSSHConn counts and logs a freshly accepted SSH connection and handles it in the background.
+// The open-connection gauge is raised here, before the (possibly slow) host key setup, so it covers the whole time the socket is open, and lowered when the handler returns.
+func serveSSHConn(conn net.Conn) {
+	stats.SSHConnections.Add(1)
+	open := &stats.OpenSSH
+	open.Add(1)
 
+	logger.WithFields(withReputation(connLogParameters(conn))).Info("SSH connection")
+
+	limitedConn := newRateLimitedConn(conn, rate)
+	config := makeSSHConfig(conn)
+	go func() {
+		defer open.Add(-1)
+		handleConnection(limitedConn, &config)
+	}()
+}
+
+func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	// Random early disconnect (~10%)
 	if rand.Intn(10) == 0 {
+		stats.DroppedConnections.Add(1)
 		logger.WithFields(connLogParameters(conn)).
 			Info("Connection dropped (simulated network issue)")
 		conn.Close()
@@ -899,6 +922,10 @@ func init() {
 		UserAgent: appName + "/" + appVersion,
 	})
 
+	// Optional REST endpoint with live statistics (disabled unless STATS_BIND is set).
+	statsBind = getEnvWithDefault("STATS_BIND", "")
+	statsToken = getEnvWithDefault("STATS_TOKEN", "")
+
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
 		"app": logrus.Fields{
@@ -924,6 +951,10 @@ func init() {
 			"TELNET_BIND":               telnetBind,
 			"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
 			"TELNET_RATE":               telnetRate,
+		},
+		"stats": logrus.Fields{
+			"STATS_BIND":  statsBind,
+			"STATS_TOKEN": statsToken != "", // never log the token itself
 		},
 		"logging": logrus.Fields{
 			"LOG_TO":        logOut.Mode,
@@ -961,6 +992,17 @@ func init() {
 }
 
 func main() {
+	// REST statistics endpoint
+	if statsBind != "" {
+		_, addr, err := common.ServeStats(statsBind, common.StatsHandler(func() common.Snapshot {
+			return stats.Snapshot(appName, abuseReporter, time.Now())
+		}, statsToken))
+		if err != nil {
+			logrus.WithError(err).Fatal("Cannot start statistics endpoint (STATS_BIND)")
+		}
+		logrus.WithField("address", addr.String()).Info("Statistics endpoint listening on /stats")
+	}
+
 	// SSH listener
 	go func() {
 		socket, err := net.Listen("tcp", sshd_bind)
@@ -975,12 +1017,7 @@ func main() {
 				continue
 			}
 
-			stats.SSHConnections.Add(1)
-			logger.WithFields(withReputation(connLogParameters(conn))).Info("SSH connection")
-
-			limitedConn := newRateLimitedConn(conn, rate)
-			config := makeSSHConfig(conn)
-			go handleConnection(limitedConn, &config)
+			serveSSHConn(conn)
 		}
 	}()
 

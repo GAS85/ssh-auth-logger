@@ -31,6 +31,9 @@ func TestStats_ShutdownLineContainsAllCounters(t *testing.T) {
 	s.SSHPasswords.Store(11)
 	s.TelnetPasswords.Store(4)
 	s.SSHKeys.Store(3)
+	s.DroppedConnections.Store(2)
+	s.OpenSSH.Store(4)
+	s.OpenTelnet.Store(1)
 
 	ch := make(chan abuse.Report, 4)
 	m := abuse.NewManager([]abuse.Backend{&sinkBackend{ch: ch}}, 1, time.Hour, time.Hour, time.Hour)
@@ -53,7 +56,8 @@ func TestStats_ShutdownLineContainsAllCounters(t *testing.T) {
 		"connections": 12, "sshConnections": 7, "telnetConnections": 5,
 		"passwordAttempts": 15, "sshPasswordAttempts": 11, "telnetPasswordAttempts": 4,
 		"sshKeyAttempts": 3, "reportsTriggered": 1, "reportsSent": 1,
-		"uptimeSeconds": 5430,
+		"uptimeSeconds": 5430, "droppedConnections": 2,
+		"openConnections": 5, "openSshConnections": 4, "openTelnetConnections": 1,
 	}
 	for k, v := range want {
 		if got, ok := out[k].(float64); !ok || got != v {

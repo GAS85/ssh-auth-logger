@@ -604,9 +604,7 @@ func startSSHServer(t *testing.T) string {
 			if err != nil {
 				return
 			}
-			cfg := makeSSHConfig(conn)
-			limited := newRateLimitedConn(conn, 10_000_000)
-			go handleConnection(limited, &cfg)
+			serveSSHConn(conn) // same path as the real listener
 		}
 	}()
 	return ln.Addr().String()
