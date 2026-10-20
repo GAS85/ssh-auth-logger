@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SSH Auth Logger Dashboard</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+  <header>
+    <h1>SSH Auth Logger</h1>
+    <div id="status" role="status">Connecting…</div>
+  </header>
+  <div id="warnings"></div>
+
+  <section id="metrics" class="metrics"></section>
+
+  <section class="panel">
+    <h2>Connections by country <small>last 60 minutes</small></h2>
+    <div class="maprow">
+      <div id="map" class="map"></div>
+      <ol id="toplist" class="toplist"></ol>
+    </div>
+    <div id="mapnote" class="note"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Activity <small>per minute, last 60 minutes</small></h2>
+    <div id="timeline" class="timeline"></div>
+    <div class="legend">
+      <span><i class="sw ssh"></i>SSH</span><span><i class="sw telnet"></i>Telnet</span>
+      <span><i class="sw pw"></i>Password attempts</span><span><i class="sw key"></i>Key attempts</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Latest events</h2>
+    <div class="scroll">
+      <table id="events"></table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Latest credentials</h2>
+    <div class="scroll">
+      <table id="attempts"></table>
+    </div>
+  </section>
+
+  <script src="/vendor/d3.min.js"></script>
+  <script src="/vendor/topojson-client.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+
+</html>

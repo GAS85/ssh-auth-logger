@@ -5,3 +5,5 @@ README.md
 Dockerfile
 *_test.go
 internal/*/*_test.go
+web-ui
+docker-compose.yml
