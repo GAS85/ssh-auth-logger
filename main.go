@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/GAS85/ssh-auth-logger/internal/abuse"
+	"github.com/GAS85/ssh-auth-logger/internal/common"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -45,13 +46,9 @@ var (
 	sendBanner       bool
 	logClearPassword bool
 
-	logger                  = logrus.WithFields(commonFields)
+	logger                  = common.NewLogger(appName)
 	allowedLogFields        map[string]bool
 	errAuthenticationFailed = errors.New(":)")
-	commonFields            = logrus.Fields{
-		"destinationServicename": "sshd",
-		"product":                appName,
-	}
 
 	hostKeyCacheTTL     time.Duration
 	hostKeyCacheCleanup time.Duration
@@ -102,7 +99,10 @@ var hostKeys *hostKeyCache
 var abuseReporter *abuse.Manager
 
 // logDest holds the log writers chosen with LOG_TO; the shutdown statistics go to logDest.Startup (console, plus the file if one is used).
-var logDest *logOutputs
+var logDest *common.LogOutputs
+
+// stats is updated by the SSH and Telnet handlers and logged on shutdown.
+var stats = common.NewStats()
 
 // TTL-aware cache for a host key
 func newHostKeyCache(ttl, cleanupEvery time.Duration) *hostKeyCache {
@@ -176,7 +176,7 @@ func withReputation(fields logrus.Fields) logrus.Fields {
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
 
-	stats.telnetConnections.Add(1)
+	stats.TelnetConnections.Add(1)
 	logger.WithFields(withReputation(connLogParameters(conn))).
 		WithField("destinationServicename", "telnetd").
 		Info("Telnet connection")
@@ -222,7 +222,7 @@ func handleTelnetConnection(conn net.Conn) {
 	fields["password"] = loggedPassword
 	fields["protocol"] = "telnet"
 
-	stats.telnetPasswords.Add(1)
+	stats.TelnetPasswords.Add(1)
 	logger.WithFields(fields).
 		WithField("destinationServicename", "telnetd").
 		Info("Telnet login attempt")
@@ -682,7 +682,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 				loggedPassword = string(password)
 			}
 
-			stats.sshPasswords.Add(1)
+			stats.SSHPasswords.Add(1)
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
 					"password":        loggedPassword,
@@ -710,7 +710,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
 			time.Sleep(base + jitter)
 
-			stats.sshKeys.Add(1)
+			stats.SSHKeys.Add(1)
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
 					"keytype":         key.Type(),
@@ -822,64 +822,12 @@ func getEnvWithDefault(key, fallback string) string {
 	return value
 }
 
-// parseAllowedFields parses a comma-separated list of allowed fields
-func parseAllowedFields(env string) map[string]bool {
-	fields := make(map[string]bool)
-	for _, f := range strings.Split(env, ",") {
-		f = strings.TrimSpace(f)
-		if f != "" {
-			fields[f] = true
-		}
-	}
-	return fields
-}
-
-type FilteredJSONFormatter struct {
-	Allowed map[string]bool
-	Base    *logrus.JSONFormatter
-}
-
-// Format filters the log entry to include only allowed fields
-func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	// Ensure Base is not nil
-	var baseFormatter *logrus.JSONFormatter
-	if f.Base == nil {
-		// Create a default JSON formatter with sensible defaults
-		baseFormatter = &logrus.JSONFormatter{
-			TimestampFormat:  time.RFC3339Nano,
-			DisableTimestamp: false,
-			PrettyPrint:      false,
-		}
-	} else {
-		baseFormatter = f.Base
-	}
-
-	// Filter the fields
-	filtered := logrus.Fields{}
-	for k, v := range entry.Data {
-		if len(f.Allowed) == 0 {
-			// If Allowed is empty, don't include any custom fields
-			continue
-		}
-		if f.Allowed[k] {
-			filtered[k] = v
-		}
-	}
-
-	// Create a new entry with filtered data
-	newEntry := *entry
-	newEntry.Data = filtered
-
-	// Format using the base formatter
-	return baseFormatter.Format(&newEntry)
-}
-
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
 	// Log destination: LOG_TO=console (default), file or both. Until the startup message is out, everything is also written to the console (see logOutputs), so the configuration is always visible there; afterwards only LOG_TO decides.
 	logFilePath := getEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
-	logOut, err := setupLogOutput(getEnvWithDefault("LOG_TO", logToConsole), logFilePath, os.Stderr)
+	logOut, err := common.SetupLogOutput(getEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stderr)
 	if err != nil {
 		logrus.Fatal(err)
 	}
@@ -994,8 +942,8 @@ func init() {
 
 	// Configure allowed log fields from environment variable
 	if logsEnv != "" {
-		allowedLogFields = parseAllowedFields(logsEnv)
-		logrus.SetFormatter(&FilteredJSONFormatter{
+		allowedLogFields = common.ParseAllowedFields(logsEnv)
+		logrus.SetFormatter(&common.FilteredJSONFormatter{
 			Allowed: allowedLogFields,
 			Base: &logrus.JSONFormatter{
 				TimestampFormat: time.RFC3339Nano,
@@ -1005,7 +953,7 @@ func init() {
 
 	logsEnv, isSet := os.LookupEnv("LOG_FILTER")
 	if isSet {
-		allowedLogFields = parseAllowedFields(logsEnv)
+		allowedLogFields = common.ParseAllowedFields(logsEnv)
 		if len(allowedLogFields) == 0 {
 			logrus.Warn("LOG_FILTER is set but empty; no structured fields will be logged")
 		}
@@ -1027,7 +975,7 @@ func main() {
 				continue
 			}
 
-			stats.sshConnections.Add(1)
+			stats.SSHConnections.Add(1)
 			logger.WithFields(withReputation(connLogParameters(conn))).Info("SSH connection")
 
 			limitedConn := newRateLimitedConn(conn, rate)
@@ -1054,5 +1002,5 @@ func main() {
 	}()
 
 	// Block until SIGTERM/SIGINT, then log the run statistics and exit.
-	handleShutdown(notifyShutdown(), logDest.Startup, stats, abuseReporter, os.Exit)
+	common.HandleShutdown(common.NotifyShutdown(), logDest.Startup, appName, stats, abuseReporter, os.Exit)
 }

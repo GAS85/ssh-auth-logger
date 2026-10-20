@@ -4,3 +4,4 @@
 README.md
 Dockerfile
 *_test.go
+internal/*/*_test.go
