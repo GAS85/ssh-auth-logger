@@ -38,10 +38,13 @@ ssh-auth-logger uses HMAC to hash the destination IP address and a key in order 
 
 Optionally ssh-auth-logger will report IPs to the:
 
-- [AbuseIPDB](https://www.abuseipdb.com)
-- [OTX](https://otx.alienvault.com/)
-- [Blocklist.de](https://www.blocklist.de/)
-- [Dshield](https://www.dshield.org/)
+- [AbuseIPDB](https://www.abuseipdb.com). Example: <a href="https://www.abuseipdb.com/user/28854" title="AbuseIPDB is an IP address blacklist for webmasters and sysadmins to report IP addresses engaging in abusive behavior on their networks">
+  <img src="https://www.abuseipdb.com/contributor/28854.svg" alt="AbuseIPDB Contributor Badge" style="width: 150px;">
+</a>
+- [Blocklist.de](https://www.blocklist.de/).
+- [Dshield](https://www.dshield.org/).
+- [OTX](https://otx.alienvault.com/). Example: [Pulse](https://otx.alienvault.com/pulse/6ac13ae75bd5969edd2d1398).
+- [Spamhouse](https://submit.spamhaus.org/dashboard). Example [IP leaderboard](https://submit.spamhaus.org/leaderboards/ip/).
 
 Example of AbuseIPDB report sent:
 
@@ -356,6 +359,43 @@ This part is optional, you can skip it and use defaults listed here.
       - SPAMHAUS_API_KEY=someKey   # Your API Key. Get one after registration: hhttps://auth.spamhaus.org/account/
       - SPAMHAUS_THREAT_TYPE=attack # Please refer to https://submit.spamhaus.org/api/#threats-types
 ```
+
+### Statistics endpoint
+
+There is an `/stats` endpoint that can return you data in real time. Example:
+
+```json
+{
+  "product": "ssh-auth-logger",
+  "startedAt": "2026-10-20T09:02:25Z",
+  "uptime": "3m47s",
+  "uptimeSeconds": 226,
+  "connections": 2,
+  "sshConnections": 2,
+  "telnetConnections": 0,
+  "droppedConnections": 0,
+  "openConnections": 1,
+  "openSshConnections": 1,
+  "openTelnetConnections": 0,
+  "passwordAttempts": 11,
+  "sshPasswordAttempts": 11,
+  "telnetPasswordAttempts": 0,
+  "sshKeyAttempts": 0,
+  "reportsTriggered": 1,
+  "reportsSent": 5,
+  "reportsByBackend": {
+    "AbuseIPDB": 1,
+    "DShield": 1,
+    "OTX": 1,
+    "Spamhaus": 1,
+    "blocklist.de": 1
+  }
+}
+```
+
+It is disabled per default, to enable it you have to set `STATS_BIND`, e.g. to `STATS_BIND=127.0.0.1:8080`, this will expose stats on a localhost port `8080`. Only `GET` and `HEAD` are accepted. Bind it to localhost or a private interface and put TLS and a firewall in front if it must be reachable. The endpoint itself is plain HTTP.
+
+You can add authorization token via `STATS_TOKEN`, in this case caller must set header `Authorization: Bearer <token>`
 
 ## Build local
 
