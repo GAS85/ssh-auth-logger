@@ -39,8 +39,7 @@ ssh-auth-logger uses HMAC to hash the destination IP address and a key in order 
 Optionally ssh-auth-logger will report IPs to the:
 
 - [AbuseIPDB](https://www.abuseipdb.com). Example: <a href="https://www.abuseipdb.com/user/28854" title="AbuseIPDB is an IP address blacklist for webmasters and sysadmins to report IP addresses engaging in abusive behavior on their networks">
-  <img src="https://www.abuseipdb.com/contributor/28854.svg" alt="AbuseIPDB Contributor Badge" style="width: 150px;">
-</a>
+  <img src="https://www.abuseipdb.com/contributor/28854.svg" alt="AbuseIPDB Contributor Badge" style="width: 150px;"></a>
 - [Blocklist.de](https://www.blocklist.de/).
 - [Dshield](https://www.dshield.org/).
 - [OTX](https://otx.alienvault.com/). Example: [Pulse](https://otx.alienvault.com/pulse/6ac13ae75bd5969edd2d1398).
