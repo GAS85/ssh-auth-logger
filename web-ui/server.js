@@ -91,7 +91,7 @@ function parseLog(text) {
   return records.sort((a, b) => timeOf(b) - timeOf(a));
 }
 
-// Reads at most the last maxBytes of the file, starting at a line boundary.
+// Reads at most the last maxBytes of the file, starting at a line boundary. truncated tells that older lines exist that were not read.
 async function readLogTail(file, maxBytes) {
   const fh = await fs.promises.open(file, "r");
   try {
@@ -100,11 +100,12 @@ async function readLogTail(file, maxBytes) {
     const buf = Buffer.alloc(length);
     await fh.read(buf, 0, length, size - length);
     let text = buf.toString("utf8");
-    if (size > length) {
+    const truncated = size > length;
+    if (truncated) {
       const nl = text.indexOf("\n");
       text = nl === -1 ? "" : text.slice(nl + 1); // drop the cut-off first line
     }
-    return text;
+    return { text, truncated };
   } finally {
     await fh.close();
   }
@@ -282,12 +283,15 @@ async function buildDashboard() {
   ]);
 
   const stats = statsResult.status === "fulfilled" ? statsResult.value : null;
-  const raw = logText.status === "fulfilled" ? logText.value : "";
+  const raw = logText.status === "fulfilled" ? logText.value.text : "";
+  const truncated = logText.status === "fulfilled" && logText.value.truncated;
 
   const events = parseLog(raw).map((e) => ({ ...e, ...classify(e) }));
 
+  // The window is aligned to whole minutes. Buckets then keep their boundaries from one request to the next, so a bar only changes when events arrive; with a window relative to "now" every refresh would shift events between neighbouring buckets.
   const now = Date.now();
-  const cutoff = now - WINDOW_MINUTES * 60000;
+  const end = Math.floor(now / 60000) * 60000 + 60000; // end of the current minute
+  const cutoff = end - WINDOW_MINUTES * 60000;
 
   // Latest events that belong to a source address (startup and abuse messages have none).
   const recent = events.filter((e) => e.src && e.type !== "other").slice(0, 10);
@@ -298,7 +302,7 @@ async function buildDashboard() {
   // Countries are counted over all connections of the window, not only the 10 shown.
   const windowConnections = events.filter((e) => {
     const t = timeOf(e);
-    return e.type === "connection" && e.src && t >= cutoff && t <= now + 60000;
+    return e.type === "connection" && e.src && t >= cutoff && t < end;
   });
 
   // Recent events first, so what is on screen gets its country before the statistics do.
@@ -340,24 +344,31 @@ async function buildDashboard() {
     keytype: e.keytype || null,
   }));
 
-  // Rolling 60-minute timeline; bucket i covers [cutoff + i min, cutoff + (i+1) min).
-  const buckets = Array.from({ length: WINDOW_MINUTES }, (_, i) => ({
-    time: new Date(cutoff + i * 60000).toISOString(),
+  // Oldest event that was read. If the log was cut at the start, buckets before that point only have part of their events.
+  const oldest = events.reduce((m, e) => {
+    const t = timeOf(e);
+    return t > 0 && t < m ? t : m;
+  }, Infinity);
+
+  // 60 one-minute buckets; bucket i covers [cutoff + i min, cutoff + (i+1) min). The last one is the current minute and still counting.
+  const buckets = Array.from({ length: WINDOW_MINUTES }, (_, i) => {
+    const startMs = cutoff + i * 60000;
+    return {
+      time: new Date(startMs).toISOString(),
     ssh: 0,
     telnet: 0,
     passwords: 0,
     keys: 0,
     dropped: 0,
-  }));
+      current: i === WINDOW_MINUTES - 1,
+      complete: !(truncated && startMs < oldest),
+    };
+  });
 
   for (const e of events) {
     const t = timeOf(e);
-    if (t < cutoff || t > now + 60000) continue;
-    const index = Math.min(
-      WINDOW_MINUTES - 1,
-      Math.max(0, Math.floor((t - cutoff) / 60000)),
-    );
-    const b = buckets[index];
+    if (t < cutoff || t >= end) continue;
+    const b = buckets[Math.floor((t - cutoff) / 60000)];
 
     if (e.type === "connection") {
       if (e.protocol === "ssh") b.ssh++;

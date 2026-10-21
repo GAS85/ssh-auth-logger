@@ -16,6 +16,7 @@
   <div id="warnings"></div>
 
   <section id="metrics" class="metrics"></section>
+  <section id="reporting"></section>
 
   <section class="panel">
     <h2>Connections by country <small>last 60 minutes</small></h2>
@@ -32,26 +33,23 @@
     <div class="legend">
       <span><i class="sw ssh"></i>SSH</span><span><i class="sw telnet"></i>Telnet</span>
       <span><i class="sw pw"></i>Password attempts</span><span><i class="sw key"></i>Key attempts</span>
+      <span><i class="sw drop"></i>Dropped (simulated)</span>
     </div>
+    <div id="timelinenote" class="note"></div>
   </section>
 
   <section class="panel">
     <h2>Latest events</h2>
-    <div class="scroll">
-      <table id="events"></table>
-    </div>
+    <div class="scroll"><table id="events"></table></div>
   </section>
 
   <section class="panel">
     <h2>Latest credentials</h2>
-    <div class="scroll">
-      <table id="attempts"></table>
-    </div>
+    <div class="scroll"><table id="attempts"></table></div>
   </section>
 
   <script src="/vendor/d3.min.js"></script>
   <script src="/vendor/topojson-client.min.js"></script>
   <script src="/app.js"></script>
 </body>
-
 </html>

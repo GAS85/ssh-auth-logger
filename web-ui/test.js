@@ -153,3 +153,31 @@ test("static files: page with CSP, vendor files, no path traversal", async () =>
   }
   assert.equal((await fetch(base + "/favicon.ico")).status, 204);
 });
+
+test("timeline buckets are aligned to whole minutes and do not move between refreshes", async () => {
+  const realNow = Date.now;
+  try {
+    const minute = Math.floor(realNow() / 60000) * 60000;
+    const at = (offsetSec) => { Date.now = () => minute + offsetSec * 1000; };
+
+    at(5); const a = (await get("/api/dashboard")).body.timeline;
+    at(45); const b = (await get("/api/dashboard")).body.timeline;
+    assert.deepEqual(a, b, "same minute: the buckets must be identical");
+    for (const x of a) assert.equal(Date.parse(x.time) % 60000, 0, "bucket start is a whole minute");
+    assert.equal(a.length, 60);
+    assert.equal(a[59].current, true);
+    assert.ok(a.slice(0, 59).every((x) => !x.current));
+
+    at(65); const c = (await get("/api/dashboard")).body.timeline;
+    // One minute later the window moved by exactly one bucket.
+    assert.deepEqual(c.slice(0, 59).map(({ time, ...r }) => r), a.slice(1).map(({ time, ...r }) => r).map((r) => ({ ...r, current: false })));
+    assert.equal(Date.parse(c[0].time), Date.parse(a[0].time) + 60000);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("buckets older than the part of the log that was read are marked incomplete", async () => {
+  const { body } = await get("/api/dashboard");
+  assert.ok(body.timeline.every((b) => typeof b.complete === "boolean"));
+});

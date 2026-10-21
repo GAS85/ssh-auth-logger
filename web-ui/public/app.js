@@ -131,17 +131,29 @@ function renderMap(data) {
 
 // ── timeline ─────────────────────────────────────────────────────────────────
 
+// Round the y-axis maximum up to 1, 2, 4, 5 or 10 times a power of ten (at least 4), so the scale does not change with every single event.
+function niceMax(v) {
+  if (v <= 4) return 4;
+  const pow = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 4, 5, 10]) if (m * pow >= v) return m * pow;
+  return 10 * pow;
+}
+
 function renderTimeline(data) {
   const box = document.getElementById("timeline");
+  const noteBox = document.getElementById("timelinenote");
   box.replaceChildren();
+  noteBox.textContent = "";
   const t = data.timeline || [];
   if (!t.length) { box.appendChild(el("div", "No data", "empty")); return; }
 
   const W = 960, H = 200, L = 36, R = 8, T = 8, B = 22;
   const iw = W - L - R, ih = H - T - B;
-  const max = Math.max(1, ...t.map((b) => Math.max(b.ssh + b.telnet, b.passwords + b.keys)));
+  const max = niceMax(Math.max(...t.map((b) => Math.max(b.ssh + b.telnet, b.passwords, b.keys, b.dropped))));
   const y = (v) => T + ih - (v / max) * ih;
   const bw = iw / t.length;
+  // The current minute is still counting and, if the log was cut at the start, the oldest minutes are incomplete: show those fainter instead of presenting them as final.
+  const opacity = (b) => (b.current || b.complete === false ? 0.45 : 1);
 
   const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Activity per minute" });
   for (const frac of [0, 0.5, 1]) {
@@ -154,21 +166,46 @@ function renderTimeline(data) {
   t.forEach((b, i) => {
     const x = L + i * bw;
     const hs = (b.ssh / max) * ih, ht = (b.telnet / max) * ih;
-    if (b.ssh) svg.appendChild(svgEl("rect", { x: x + 1, y: T + ih - hs, width: Math.max(1, bw - 2), height: hs, fill: "#38bdf8" }));
-    if (b.telnet) svg.appendChild(svgEl("rect", { x: x + 1, y: T + ih - hs - ht, width: Math.max(1, bw - 2), height: ht, fill: "#f59e0b" }));
+    const op = opacity(b);
+    if (b.ssh) svg.appendChild(svgEl("rect", { x: x + 1, y: T + ih - hs, width: Math.max(1, bw - 2), height: hs, fill: "#38bdf8", "fill-opacity": op }));
+    if (b.telnet) svg.appendChild(svgEl("rect", { x: x + 1, y: T + ih - hs - ht, width: Math.max(1, bw - 2), height: ht, fill: "#f59e0b", "fill-opacity": op }));
   });
-  const line = (key, stroke) => {
-    const pts = t.map((b, i) => `${(L + i * bw + bw / 2).toFixed(1)},${y(b[key]).toFixed(1)}`).join(" ");
-    svg.appendChild(svgEl("polyline", { points: pts, fill: "none", stroke, "stroke-width": 1.5 }));
+
+  // Lines are drawn as segments so a faint (current or incomplete) minute is not joined up as if it were final.
+  const line = (key, stroke, dash) => {
+    for (let i = 1; i < t.length; i++) {
+      const faint = opacity(t[i]) < 1 || opacity(t[i - 1]) < 1;
+      const seg = svgEl("line", {
+        x1: L + (i - 1) * bw + bw / 2, y1: y(t[i - 1][key]), x2: L + i * bw + bw / 2, y2: y(t[i][key]),
+        stroke, "stroke-width": 1.5, "stroke-opacity": faint ? 0.45 : 1,
+      });
+      if (dash) seg.setAttribute("stroke-dasharray", dash);
+      svg.appendChild(seg);
+    }
   };
   line("passwords", "#f472b6");
   line("keys", "#a3e635");
+  line("dropped", "#ef4444", "4 3");
+
   [0, Math.floor(t.length / 2), t.length - 1].forEach((i) => {
     const lab = svgEl("text", { x: L + i * bw + bw / 2, y: H - 6, "text-anchor": i === 0 ? "start" : i === t.length - 1 ? "end" : "middle", fill: "#8aa0bf", "font-size": 11 });
     lab.textContent = hhmm(t[i].time);
     svg.appendChild(lab);
   });
+
+  // Invisible full-height areas carry the tooltip for each minute.
+  t.forEach((b, i) => {
+    const r = svgEl("rect", { x: L + i * bw, y: T, width: bw, height: ih, fill: "transparent" });
+    const title = svgEl("title");
+    title.textContent = `${hhmm(b.time)}${b.current ? " (current minute, still counting)" : b.complete === false ? " (incomplete: log was cut)" : ""}\n` +
+      `SSH ${b.ssh} · Telnet ${b.telnet}\nPasswords ${b.passwords} · Keys ${b.keys} · Dropped ${b.dropped}`;
+    r.appendChild(title);
+    svg.appendChild(r);
+  });
   box.appendChild(svg);
+
+  const incomplete = t.some((b) => b.complete === false);
+  noteBox.textContent = "Fainter bars: the current minute is still counting" + (incomplete ? ", and the oldest minutes are incomplete because only the end of the log file is read." : ".");
 }
 
 // ── metrics and tables ───────────────────────────────────────────────────────
@@ -193,6 +230,38 @@ function renderMetrics(s) {
   card("Uptime", s.uptime || "—");
 }
 
+// Backends the honeypot can report to (names as in its /stats output). Only enabled ones appear in reportsByBackend.
+const KNOWN_BACKENDS = ["AbuseIPDB", "DShield", "OTX", "blocklist.de", "Spamhaus"];
+
+function renderReporting(s) {
+  const box = document.getElementById("reporting");
+  box.replaceChildren();
+  if (!s || !s.reportsByBackend) return;
+  const enabled = s.reportsByBackend;
+  const names = [...KNOWN_BACKENDS, ...Object.keys(enabled).filter((n) => !KNOWN_BACKENDS.includes(n))];
+  const anyEnabled = Object.keys(enabled).length > 0;
+
+  const head = el("div", anyEnabled ? "Abuse reporting (reports handed to each service)" : "Abuse reporting is not enabled", "rowhead");
+  box.appendChild(head);
+  const row = el("div", null, "metrics");
+  for (const name of names) {
+    const on = Object.prototype.hasOwnProperty.call(enabled, name);
+    const c = el("div", null, "card" + (on ? "" : " off"));
+    c.appendChild(el("div", name, "label"));
+    c.appendChild(el("div", on ? fmt(enabled[name]) : "—", "value"));
+    c.appendChild(el("div", on ? "enabled" : "disabled", "sub"));
+    row.appendChild(c);
+  }
+  box.appendChild(row);
+}
+
+// Link to the AbuseIPDB page of an address; null unless the value really looks like an IP address (it comes from the log).
+function abuseIpdbUrl(ip) {
+  const s = String(ip || "");
+  if (s.length > 45 || !/^[0-9a-fA-F:.]+$/.test(s) || !/[.:]/.test(s)) return null;
+  return "https://www.abuseipdb.com/check/" + encodeURIComponent(s);
+}
+
 function renderTable(id, columns, rows, emptyText) {
   const table = document.getElementById(id);
   table.replaceChildren();
@@ -206,7 +275,22 @@ function renderTable(id, columns, rows, emptyText) {
   const tbody = el("tbody");
   for (const r of rows) {
     const tr = el("tr");
-    for (const c of columns) tr.appendChild(el("td", c.value(r), c.cls));
+    for (const c of columns) {
+      const td = el("td", c.link ? null : c.value(r), c.cls);
+      const href = c.link ? c.link(r) : null;
+      if (c.link) {
+        if (href) {
+          const a = el("a", c.value(r));
+          a.href = href;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          td.appendChild(a);
+        } else {
+          td.textContent = c.value(r);
+        }
+      }
+      tr.appendChild(td);
+    }
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
@@ -216,7 +300,7 @@ function renderTables(data) {
   renderTable("events", [
     { title: "Time", value: (r) => when(r.time) },
     { title: "Protocol", value: (r) => r.protocol },
-    { title: "Source", value: (r) => r.src, cls: "mono" },
+    { title: "Source", value: (r) => r.src, link: (r) => abuseIpdbUrl(r.src), cls: "mono" },
     { title: "Country", value: (r) => (r.countryCode ? r.countryCode + (r.country ? " – " + r.country : "") : "—") },
     { title: "Abuse score", value: (r) => (r.abuseConfidenceScore ?? "—") },
     { title: "Reports", value: (r) => (r.totalReports ?? "—") },
@@ -226,7 +310,7 @@ function renderTables(data) {
   renderTable("attempts", [
     { title: "Time", value: (r) => when(r.time) },
     { title: "Protocol", value: (r) => r.protocol },
-    { title: "Source", value: (r) => r.src, cls: "mono" },
+    { title: "Source", value: (r) => r.src, link: (r) => abuseIpdbUrl(r.src), cls: "mono" },
     { title: "User", value: (r) => r.username, cls: "wrap mono" },
     { title: "Password / key", value: (r) => (r.type === "password" ? r.password : (r.keytype || "key") + " " + (r.fingerprint || "")), cls: "wrap mono" },
   ], data.attempts || [], "No credentials yet");
@@ -253,6 +337,7 @@ async function refresh() {
     warn(w);
 
     renderMetrics(data.stats);
+    renderReporting(data.stats);
     renderMap(data);
     renderTimeline(data);
     renderTables(data);
