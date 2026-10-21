@@ -128,6 +128,7 @@ jobs:
         id: meta
         run: |
           echo "REPO=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "VERSION=dev" >> $GITHUB_OUTPUT
 
       - name: Login to Docker Hub
         # https://github.com/docker/login-action/releases/tag/v4.1.0
