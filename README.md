@@ -34,6 +34,14 @@ ssh-auth-logger logs all authentication attempts as json making it easy to consu
 
 ssh-auth-logger uses HMAC to hash the destination IP address and a key in order to generate a consistently "random" key for every responding IP address.  This means you can run ssh-auth-logger on a /16 and every ip address will appear with a different host key. Random sshd version reporting as well.
 
+### Web UI
+
+Optional simple web-ui will give you an overview about current state of your honeypot. It evaluates stats endpoint and logs output. Both show you real time data.
+
+[![SSH-Auth-logger Web UI](https://github.com/user-attachments/assets/c5d5af6c-7d26-4442-b484-20568e42d7c6)](./web-ui/README.md)
+
+Please refer to [Web-UI Documentation](./web-ui/README.md) to enable Web-UI for a ssh-auth-logger.
+
 ### Abuse Reporting
 
 Optionally ssh-auth-logger will report IPs to the:
@@ -414,6 +422,8 @@ go test ./... -v
 
 ## fail2ban configuration
 
+### Block logging attempts
+
 To configure [fail2ban](https://github.com/fail2ban/fail2ban) you have to create a filter:
 
 ```shell
@@ -449,12 +459,12 @@ enabled = true
 filter = ssh-auth-logger
 action = iptables-allports
          # Additionally you can setup abuseipdb reporting as per https://github.com/fail2ban/fail2ban/blob/master/config/action.d/abuseipdb.conf
-         # Or directly with ssh-auth-logger
+         # Or direct with ssh-auth-logger
          #abuseipdb[abuseipdb_category="18,22"]
 # Docker mount log to the localsystem
 logpath = /var/docker/ssh-auth-logger/log/ssh-auth-logger.log
 # maxretry should be equal or more than in a SSHD_MAX_AUTH_TRIES
-maxretry = 6
+maxretry = 12
 # For very slow attacker that tries 3 passwords per day
 findtime = 1d
 # Ban time can be anything you like
@@ -466,3 +476,97 @@ After that you have to reload your fail2ban with command:
 ```shell
 sudo fail2ban-client reload
 ```
+
+### Block aggressive port ping
+
+The same approach as above, but with different filter:
+
+```shell
+[Definition]
+_daemon = ssh-auth-logger
+
+# Match JSON log line with a "time", "msg" fields and a "src" IP
+failregex = ^.*"msg":"(SSH|Telnet) connection".*"src":"<HOST>".*$
+
+datepattern = %%Y-%%m-%%dT%%H:%%M:%%S(?:Z|%%z)
+
+ignoreregex =
+```
+
+Set `maxretry` for this filter around 1,5 - 2 bigger than for a [Block logging attempts `maxretry`](#block-logging-attempts).
+
+## Cacti integration
+
+For cacti integration you can use 2 approaches.
+
+### Use stats endpoint
+
+This is the easiest way to get data into cacti. You have to enable stats endpoint via `STATS_BIND=:8080` and expose it from the container. Then you can call it with `curl`:
+
+```bash
+curl http://localhost:8080 | jq -r 'to_entries | map(select(.value | type == "number") | "\(.key):\(.value)") | join(" ")'
+```
+
+Output example:
+
+```plain
+uptimeSeconds:226 connections:2 sshConnections:2 telnetConnections:0 droppedConnections:0 openConnections:1 openSshConnections:1 openTelnetConnections:0 passwordAttempts:11 sshPasswordAttempts:11 telnetPasswordAttempts:0 sshKeyAttempts:0 reportsTriggered:1 reportsSent:5
+```
+
+### Parse logs file
+
+You can parse logs file with following script `ssh-auth.logger.cacti.sh`:
+
+```bash
+#!/bin/bash
+
+# Configuration
+LOG_FILE="/var/docker/ssh-auth-logger/log/ssh-auth-logger.log"
+
+# How long shall we check back. Usual polling interval is 5 minutes
+LOOKBACK_MINUTES="${LOOKBACK_MINUTES:-5}"
+
+## END Configuration
+
+# Calculate cutoff timestamp (minute precision)
+LOOKBACK_TIME=$(date -u -d "$LOOKBACK_MINUTES minutes ago" +"%Y-%m-%dT%H:%M")
+
+jq -s -r --arg lookback "$LOOKBACK_TIME" '
+map(select(.time[0:16] >= $lookback))
+|
+{
+  sshConnections: (
+    map(select(.msg == "SSH connection"))
+    | length
+  ),
+  telnetConnections: (
+    map(select(.msg == "Telnet connection"))
+    | length
+  ),
+  sshPasswordAttempts: (
+    map(select(.msg == "Request with password"))
+    | length
+  ),
+  sshKeyAttempts: (
+    map(select(.msg == "Request with key"))
+    | length
+  ),
+  telnetPasswordAttempts: (
+    map(select(.msg == "Telnet login attempt"))
+    | length
+  ),
+  droppedConnections: (
+    map(select(.msg == "Connection dropped (simulated network issue)"))
+    | length
+  )
+}
+|
+to_entries[]
+|
+"\(.key):\(.value)" ' "$LOG_FILE" | tr '\n' ' '
+
+exit 0
+```
+
+- As advantage you do not need to enable and expose stats endpoint.
+- As disadvantage - it is more complicated and CPU consuming.
