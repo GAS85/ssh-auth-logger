@@ -1,4 +1,4 @@
-package main
+package common
 
 import (
 	"fmt"
@@ -10,25 +10,25 @@ import (
 
 // Log destinations selectable with LOG_TO.
 const (
-	logToConsole = "console"
+	LogToConsole = "console"
 	logToFile    = "file"
 	logToBoth    = "both"
 )
 
-// parseLogTo normalises the LOG_TO value. An empty value means "console".
-func parseLogTo(value string) (string, error) {
+// ParseLogTo normalises the LOG_TO value. An empty value means "console".
+func ParseLogTo(value string) (string, error) {
 	switch v := strings.ToLower(strings.TrimSpace(value)); v {
-	case "", logToConsole:
-		return logToConsole, nil
+	case "", LogToConsole:
+		return LogToConsole, nil
 	case logToFile, logToBoth:
 		return v, nil
 	default:
-		return "", fmt.Errorf("invalid LOG_TO %q (allowed: %s, %s, %s)", value, logToConsole, logToFile, logToBoth)
+		return "", fmt.Errorf("invalid LOG_TO %q (allowed: %s, %s, %s)", value, LogToConsole, logToFile, logToBoth)
 	}
 }
 
-// logOutputs holds the writers logrus is pointed at over the process lifetime.
-type logOutputs struct {
+// LogOutputs holds the writers logrus is pointed at over the process lifetime.
+type LogOutputs struct {
 	// Mode is the normalised LOG_TO value: console, file or both.
 	Mode string
 	// Startup receives everything logged while the application initialises, including the startup message with all settings. It always includes the console, and in addition the file if a file was requested, so the configuration is visible on the console even with LOG_TO=file.
@@ -39,15 +39,15 @@ type logOutputs struct {
 	File *reopenFileWriter
 }
 
-// setupLogOutput builds the writers for the given LOG_TO / LOG_FILE_PATH values. console is where "console" output goes (os.Stderr in production, as logrus does by default).
-func setupLogOutput(logTo, filePath string, console io.Writer) (*logOutputs, error) {
-	mode, err := parseLogTo(logTo)
+// SetupLogOutput builds the writers for the given LOG_TO / LOG_FILE_PATH values. console is where "console" output goes (os.Stderr in production, as logrus does by default).
+func SetupLogOutput(logTo, filePath string, console io.Writer) (*LogOutputs, error) {
+	mode, err := ParseLogTo(logTo)
 	if err != nil {
 		return nil, err
 	}
 
-	if mode == logToConsole {
-		return &logOutputs{Mode: mode, Startup: console, Runtime: console}, nil
+	if mode == LogToConsole {
+		return &LogOutputs{Mode: mode, Startup: console, Runtime: console}, nil
 	}
 
 	if strings.TrimSpace(filePath) == "" {
@@ -61,11 +61,11 @@ func setupLogOutput(logTo, filePath string, console io.Writer) (*logOutputs, err
 
 	both := multiWriter{console, file}
 	if mode == logToBoth {
-		return &logOutputs{Mode: mode, Startup: both, Runtime: both, File: file}, nil
+		return &LogOutputs{Mode: mode, Startup: both, Runtime: both, File: file}, nil
 	}
 
 	// mode == file: console only gets the startup output.
-	return &logOutputs{Mode: mode, Startup: both, Runtime: file, File: file}, nil
+	return &LogOutputs{Mode: mode, Startup: both, Runtime: file, File: file}, nil
 }
 
 // multiWriter writes to every writer, even if an earlier one fails (unlike io.MultiWriter). A broken console must not stop file logging and vice versa. It returns the first error seen.

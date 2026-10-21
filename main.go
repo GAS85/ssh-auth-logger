@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/GAS85/ssh-auth-logger/internal/abuse"
+	"github.com/GAS85/ssh-auth-logger/internal/common"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -45,13 +46,9 @@ var (
 	sendBanner       bool
 	logClearPassword bool
 
-	logger                  = logrus.WithFields(commonFields)
+	logger                  = common.NewLogger(appName)
 	allowedLogFields        map[string]bool
 	errAuthenticationFailed = errors.New(":)")
-	commonFields            = logrus.Fields{
-		"destinationServicename": "sshd",
-		"product":                appName,
-	}
 
 	hostKeyCacheTTL     time.Duration
 	hostKeyCacheCleanup time.Duration
@@ -100,6 +97,15 @@ var hostKeys *hostKeyCache
 
 // abuseReporter is the single entry point used by the SSH and Telnet handlers.
 var abuseReporter *abuse.Manager
+
+// logDest holds the log writers chosen with LOG_TO; the shutdown statistics go to logDest.Startup (console, plus the file if one is used).
+var logDest *common.LogOutputs
+
+// statsBind and statsToken configure the optional REST statistics endpoint.
+var statsBind, statsToken string
+
+// stats is updated by the SSH and Telnet handlers and logged on shutdown.
+var stats = common.NewStats()
 
 // TTL-aware cache for a host key
 func newHostKeyCache(ttl, cleanupEvery time.Duration) *hostKeyCache {
@@ -159,11 +165,25 @@ func resolveProfileKey(scope string, conn net.Conn) string {
 	return getHost(conn.LocalAddr().String())
 }
 
+// withReputation adds the cached IP reputation (countryCode, abuseConfidenceScore, totalReports) of the source IP to fields. It never blocks: on first sight of an IP, or if the data is not available, nothing is added.
+func withReputation(fields logrus.Fields) logrus.Fields {
+	if src, ok := fields["src"].(string); ok {
+		for k, v := range abuseReporter.ReputationFields(src) {
+			fields[k] = v
+		}
+	}
+	return fields
+}
+
 // Telnet handler
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
 
-	logger.WithFields(connLogParameters(conn)).
+	stats.OpenTelnet.Add(1)
+	defer stats.OpenTelnet.Add(-1)
+
+	stats.TelnetConnections.Add(1)
+	logger.WithFields(withReputation(connLogParameters(conn))).
 		WithField("destinationServicename", "telnetd").
 		Info("Telnet connection")
 
@@ -208,6 +228,7 @@ func handleTelnetConnection(conn net.Conn) {
 	fields["password"] = loggedPassword
 	fields["protocol"] = "telnet"
 
+	stats.TelnetPasswords.Add(1)
 	logger.WithFields(fields).
 		WithField("destinationServicename", "telnetd").
 		Info("Telnet login attempt")
@@ -667,6 +688,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 				loggedPassword = string(password)
 			}
 
+			stats.SSHPasswords.Add(1)
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
 					"password":        loggedPassword,
@@ -694,6 +716,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
 			time.Sleep(base + jitter)
 
+			stats.SSHKeys.Add(1)
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
 					"keytype":         key.Type(),
@@ -771,10 +794,27 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	return config
 }
 
-func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
+// serveSSHConn counts and logs a freshly accepted SSH connection and handles it in the background.
+// The open-connection gauge is raised here, before the (possibly slow) host key setup, so it covers the whole time the socket is open, and lowered when the handler returns.
+func serveSSHConn(conn net.Conn) {
+	stats.SSHConnections.Add(1)
+	open := &stats.OpenSSH
+	open.Add(1)
 
+	logger.WithFields(withReputation(connLogParameters(conn))).Info("SSH connection")
+
+	limitedConn := newRateLimitedConn(conn, rate)
+	config := makeSSHConfig(conn)
+	go func() {
+		defer open.Add(-1)
+		handleConnection(limitedConn, &config)
+	}()
+}
+
+func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	// Random early disconnect (~10%)
 	if rand.Intn(10) == 0 {
+		stats.DroppedConnections.Add(1)
 		logger.WithFields(connLogParameters(conn)).
 			Info("Connection dropped (simulated network issue)")
 		conn.Close()
@@ -805,67 +845,16 @@ func getEnvWithDefault(key, fallback string) string {
 	return value
 }
 
-// parseAllowedFields parses a comma-separated list of allowed fields
-func parseAllowedFields(env string) map[string]bool {
-	fields := make(map[string]bool)
-	for _, f := range strings.Split(env, ",") {
-		f = strings.TrimSpace(f)
-		if f != "" {
-			fields[f] = true
-		}
-	}
-	return fields
-}
-
-type FilteredJSONFormatter struct {
-	Allowed map[string]bool
-	Base    *logrus.JSONFormatter
-}
-
-// Format filters the log entry to include only allowed fields
-func (f *FilteredJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	// Ensure Base is not nil
-	var baseFormatter *logrus.JSONFormatter
-	if f.Base == nil {
-		// Create a default JSON formatter with sensible defaults
-		baseFormatter = &logrus.JSONFormatter{
-			TimestampFormat:  time.RFC3339Nano,
-			DisableTimestamp: false,
-			PrettyPrint:      false,
-		}
-	} else {
-		baseFormatter = f.Base
-	}
-
-	// Filter the fields
-	filtered := logrus.Fields{}
-	for k, v := range entry.Data {
-		if len(f.Allowed) == 0 {
-			// If Allowed is empty, don't include any custom fields
-			continue
-		}
-		if f.Allowed[k] {
-			filtered[k] = v
-		}
-	}
-
-	// Create a new entry with filtered data
-	newEntry := *entry
-	newEntry.Data = filtered
-
-	// Format using the base formatter
-	return baseFormatter.Format(&newEntry)
-}
-
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
 	// Log destination: LOG_TO=console (default), file or both. Until the startup message is out, everything is also written to the console (see logOutputs), so the configuration is always visible there; afterwards only LOG_TO decides.
 	logFilePath := getEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
-	logOut, err := setupLogOutput(getEnvWithDefault("LOG_TO", logToConsole), logFilePath, os.Stderr)
+	logOut, err := common.SetupLogOutput(getEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stderr)
 	if err != nil {
 		logrus.Fatal(err)
 	}
+	logDest = logOut
 	logrus.SetOutput(logOut.Startup)
 
 	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
@@ -933,6 +922,10 @@ func init() {
 		UserAgent: appName + "/" + appVersion,
 	})
 
+	// Optional REST endpoint with live statistics (disabled unless STATS_BIND is set).
+	statsBind = getEnvWithDefault("STATS_BIND", "")
+	statsToken = getEnvWithDefault("STATS_TOKEN", "")
+
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
 		"app": logrus.Fields{
@@ -959,6 +952,10 @@ func init() {
 			"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
 			"TELNET_RATE":               telnetRate,
 		},
+		"stats": logrus.Fields{
+			"STATS_BIND":  statsBind,
+			"STATS_TOKEN": statsToken != "", // never log the token itself
+		},
 		"logging": logrus.Fields{
 			"LOG_TO":        logOut.Mode,
 			"LOG_FILE_PATH": logFilePath,
@@ -976,8 +973,8 @@ func init() {
 
 	// Configure allowed log fields from environment variable
 	if logsEnv != "" {
-		allowedLogFields = parseAllowedFields(logsEnv)
-		logrus.SetFormatter(&FilteredJSONFormatter{
+		allowedLogFields = common.ParseAllowedFields(logsEnv)
+		logrus.SetFormatter(&common.FilteredJSONFormatter{
 			Allowed: allowedLogFields,
 			Base: &logrus.JSONFormatter{
 				TimestampFormat: time.RFC3339Nano,
@@ -987,7 +984,7 @@ func init() {
 
 	logsEnv, isSet := os.LookupEnv("LOG_FILTER")
 	if isSet {
-		allowedLogFields = parseAllowedFields(logsEnv)
+		allowedLogFields = common.ParseAllowedFields(logsEnv)
 		if len(allowedLogFields) == 0 {
 			logrus.Warn("LOG_FILTER is set but empty; no structured fields will be logged")
 		}
@@ -995,6 +992,17 @@ func init() {
 }
 
 func main() {
+	// REST statistics endpoint
+	if statsBind != "" {
+		_, addr, err := common.ServeStats(statsBind, common.StatsHandler(func() common.Snapshot {
+			return stats.Snapshot(appName, abuseReporter, time.Now())
+		}, statsToken))
+		if err != nil {
+			logrus.WithError(err).Fatal("Cannot start statistics endpoint (STATS_BIND)")
+		}
+		logrus.WithField("address", addr.String()).Info("Statistics endpoint listening on /stats")
+	}
+
 	// SSH listener
 	go func() {
 		socket, err := net.Listen("tcp", sshd_bind)
@@ -1009,11 +1017,7 @@ func main() {
 				continue
 			}
 
-			logger.WithFields(connLogParameters(conn)).Info("SSH connection")
-
-			limitedConn := newRateLimitedConn(conn, rate)
-			config := makeSSHConfig(conn)
-			go handleConnection(limitedConn, &config)
+			serveSSHConn(conn)
 		}
 	}()
 
@@ -1034,6 +1038,6 @@ func main() {
 		}
 	}()
 
-	// Block forever
-	select {}
+	// Block until SIGTERM/SIGINT, then log the run statistics and exit.
+	common.HandleShutdown(common.NotifyShutdown(), logDest.Startup, appName, stats, abuseReporter, os.Exit)
 }

@@ -34,14 +34,24 @@ ssh-auth-logger logs all authentication attempts as json making it easy to consu
 
 ssh-auth-logger uses HMAC to hash the destination IP address and a key in order to generate a consistently "random" key for every responding IP address.  This means you can run ssh-auth-logger on a /16 and every ip address will appear with a different host key. Random sshd version reporting as well.
 
+### Web UI
+
+Optional simple web-ui will give you an overview about current state of your honeypot. It evaluates stats endpoint and logs output. Both show you real time data.
+
+[![SSH-Auth-logger Web UI](https://github.com/user-attachments/assets/c5d5af6c-7d26-4442-b484-20568e42d7c6)](./web-ui/README.md)
+
+Please refer to [Web-UI Documentation](./web-ui/README.md) to enable Web-UI for a ssh-auth-logger.
+
 ### Abuse Reporting
 
 Optionally ssh-auth-logger will report IPs to the:
 
-- [AbuseIPDB](https://www.abuseipdb.com)
-- [OTX](https://otx.alienvault.com/)
-- [Blocklist.de](https://www.blocklist.de/)
-- [Dshield](https://www.dshield.org/)
+- [AbuseIPDB](https://www.abuseipdb.com). Example: <a href="https://www.abuseipdb.com/user/28854" title="AbuseIPDB is an IP address blacklist for webmasters and sysadmins to report IP addresses engaging in abusive behavior on their networks">
+  <img src="https://www.abuseipdb.com/contributor/28854.svg" alt="AbuseIPDB Contributor Badge" style="width: 150px;"></a>
+- [Blocklist.de](https://www.blocklist.de/).
+- [Dshield](https://www.dshield.org/).
+- [OTX](https://otx.alienvault.com/). Example: [Pulse](https://otx.alienvault.com/pulse/6ac13ae75bd5969edd2d1398).
+- [Spamhouse](https://submit.spamhaus.org/dashboard). Example [IP leaderboard](https://submit.spamhaus.org/leaderboards/ip/).
 
 Example of AbuseIPDB report sent:
 
@@ -160,7 +170,7 @@ services:
 
       #- LOG_TO=consol                              # You can set to "console" (the default), "file" or "both".
       #- LOG_FILE_PATH=/var/log/ssh-auth-logger.log # Specify log file path inside of container
-      #- LOG_FILTER=""                              # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product"
+      #- LOG_FILTER=""                              # Comma-separated list of allowed fields. 'msg', 'level' and 'time' can't be removed. Following combinations are possible: "duser,src,spt,dst,dpt,client_version,server_version,password,keytype,fingerprint,server_key_type,destinationServicename,product,countryCode,abuseConfidenceScore,totalReports"
 
       # SSHD Part
 
@@ -287,6 +297,7 @@ This part is optional, you can skip it and use defaults listed here.
       - ABUSEIPDB_REPORT_CLEAR_USERNAME=false # Report User names to AbuseIPDB in a clear text
       - ABUSEIPDB_REPORT_HASHED_PASSWORD=true # Report hashed Passwords to AbuseIPDB
       - ABUSEIPDB_REPORT_CLEAR_PASSWORD=false # Report Passwords to AbuseIPDB in a clear text. It is strongly recommended to use ABUSEIPDB_REPORT_HASHED_PASSWORD instead. Works only when report of hashed password is disabled
+      - ABUSEIPDB_IP_CHECK=false              # Enable IP Reputation check and show it in logs in future connection attempt.
 ```
 
 #### Blocklist Reporting part
@@ -356,6 +367,43 @@ This part is optional, you can skip it and use defaults listed here.
       - SPAMHAUS_THREAT_TYPE=attack # Please refer to https://submit.spamhaus.org/api/#threats-types
 ```
 
+### Statistics endpoint
+
+There is an `/stats` endpoint that can return you data in real time. Example:
+
+```json
+{
+  "product": "ssh-auth-logger",
+  "startedAt": "2026-10-20T09:02:25Z",
+  "uptime": "3m47s",
+  "uptimeSeconds": 226,
+  "connections": 2,
+  "sshConnections": 2,
+  "telnetConnections": 0,
+  "droppedConnections": 0,
+  "openConnections": 1,
+  "openSshConnections": 1,
+  "openTelnetConnections": 0,
+  "passwordAttempts": 11,
+  "sshPasswordAttempts": 11,
+  "telnetPasswordAttempts": 0,
+  "sshKeyAttempts": 0,
+  "reportsTriggered": 1,
+  "reportsSent": 5,
+  "reportsByBackend": {
+    "AbuseIPDB": 1,
+    "DShield": 1,
+    "OTX": 1,
+    "Spamhaus": 1,
+    "blocklist.de": 1
+  }
+}
+```
+
+It is disabled per default, to enable it you have to set `STATS_BIND`, e.g. to `STATS_BIND=127.0.0.1:8080`, this will expose stats on a localhost port `8080`. Only `GET` and `HEAD` are accepted. Bind it to localhost or a private interface and put TLS and a firewall in front if it must be reachable. The endpoint itself is plain HTTP.
+
+You can add authorization token via `STATS_TOKEN`, in this case caller must set header `Authorization: Bearer <token>`
+
 ## Build local
 
 Fork this project and then execute:
@@ -373,6 +421,8 @@ go test ./... -v
 ```
 
 ## fail2ban configuration
+
+### Block logging attempts
 
 To configure [fail2ban](https://github.com/fail2ban/fail2ban) you have to create a filter:
 
@@ -409,12 +459,12 @@ enabled = true
 filter = ssh-auth-logger
 action = iptables-allports
          # Additionally you can setup abuseipdb reporting as per https://github.com/fail2ban/fail2ban/blob/master/config/action.d/abuseipdb.conf
-         # Or directly with ssh-auth-logger
+         # Or direct with ssh-auth-logger
          #abuseipdb[abuseipdb_category="18,22"]
 # Docker mount log to the localsystem
 logpath = /var/docker/ssh-auth-logger/log/ssh-auth-logger.log
 # maxretry should be equal or more than in a SSHD_MAX_AUTH_TRIES
-maxretry = 6
+maxretry = 12
 # For very slow attacker that tries 3 passwords per day
 findtime = 1d
 # Ban time can be anything you like
@@ -426,3 +476,97 @@ After that you have to reload your fail2ban with command:
 ```shell
 sudo fail2ban-client reload
 ```
+
+### Block aggressive port ping
+
+The same approach as above, but with different filter:
+
+```shell
+[Definition]
+_daemon = ssh-auth-logger
+
+# Match JSON log line with a "time", "msg" fields and a "src" IP
+failregex = ^.*"msg":"(SSH|Telnet) connection".*"src":"<HOST>".*$
+
+datepattern = %%Y-%%m-%%dT%%H:%%M:%%S(?:Z|%%z)
+
+ignoreregex =
+```
+
+Set `maxretry` for this filter around 1,5 - 2 bigger than for a [Block logging attempts `maxretry`](#block-logging-attempts).
+
+## Cacti integration
+
+For cacti integration you can use 2 approaches.
+
+### Use stats endpoint
+
+This is the easiest way to get data into cacti. You have to enable stats endpoint via `STATS_BIND=:8080` and expose it from the container. Then you can call it with `curl`:
+
+```bash
+curl http://localhost:8080 | jq -r 'to_entries | map(select(.value | type == "number") | "\(.key):\(.value)") | join(" ")'
+```
+
+Output example:
+
+```plain
+uptimeSeconds:226 connections:2 sshConnections:2 telnetConnections:0 droppedConnections:0 openConnections:1 openSshConnections:1 openTelnetConnections:0 passwordAttempts:11 sshPasswordAttempts:11 telnetPasswordAttempts:0 sshKeyAttempts:0 reportsTriggered:1 reportsSent:5
+```
+
+### Parse logs file
+
+You can parse logs file with following script `ssh-auth.logger.cacti.sh`:
+
+```bash
+#!/bin/bash
+
+# Configuration
+LOG_FILE="/var/docker/ssh-auth-logger/log/ssh-auth-logger.log"
+
+# How long shall we check back. Usual polling interval is 5 minutes
+LOOKBACK_MINUTES="${LOOKBACK_MINUTES:-5}"
+
+## END Configuration
+
+# Calculate cutoff timestamp (minute precision)
+LOOKBACK_TIME=$(date -u -d "$LOOKBACK_MINUTES minutes ago" +"%Y-%m-%dT%H:%M")
+
+jq -s -r --arg lookback "$LOOKBACK_TIME" '
+map(select(.time[0:16] >= $lookback))
+|
+{
+  sshConnections: (
+    map(select(.msg == "SSH connection"))
+    | length
+  ),
+  telnetConnections: (
+    map(select(.msg == "Telnet connection"))
+    | length
+  ),
+  sshPasswordAttempts: (
+    map(select(.msg == "Request with password"))
+    | length
+  ),
+  sshKeyAttempts: (
+    map(select(.msg == "Request with key"))
+    | length
+  ),
+  telnetPasswordAttempts: (
+    map(select(.msg == "Telnet login attempt"))
+    | length
+  ),
+  droppedConnections: (
+    map(select(.msg == "Connection dropped (simulated network issue)"))
+    | length
+  )
+}
+|
+to_entries[]
+|
+"\(.key):\(.value)" ' "$LOG_FILE" | tr '\n' ' '
+
+exit 0
+```
+
+- As advantage you do not need to enable and expose stats endpoint.
+- As disadvantage - it is more complicated and CPU consuming.
