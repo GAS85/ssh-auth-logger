@@ -228,6 +228,7 @@ func (m *Manager) Stop() {
 
 // RecordFailure records a failed authentication attempt.
 // Once the configured number of attempts has been reached, the IP is reported asynchronously to every enabled backend.
+// Attempts with an empty username and an empty password do not count towards the threshold.
 // Returns true if this call caused a report to be scheduled.
 func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 	// A nil Manager (Setup never called) is a harmless no-op.
@@ -260,6 +261,12 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 
 	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
 	if !state.lastReported.IsZero() && now.Sub(state.lastReported) < m.reportEvery {
+		m.mu.Unlock()
+		return false
+	}
+
+	// An attempt with both an empty username and an empty password (judged on the raw input, before any backend sanitizing) is still remembered above, but it does not count towards the report threshold and can never trigger a report on its own.
+	if username == "" && password == "" {
 		m.mu.Unlock()
 		return false
 	}

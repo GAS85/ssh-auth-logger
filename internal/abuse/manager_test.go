@@ -232,6 +232,34 @@ func TestRecordFailure_CooldownCollectsCredentialsButDoesNotCount(t *testing.T) 
 	}
 }
 
+func TestRecordFailure_EmptyUserAndPasswordDoNotCountTowardsThreshold(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(2, f)
+	ip := "192.0.2.25"
+
+	for i := 0; i < 10; i++ {
+		if m.RecordFailure(ip, "SSH", "", "") {
+			t.Fatal("empty user + empty password must never trigger a report")
+		}
+	}
+	f.expectNone(t)
+
+	attempts, _, _, ok := snapshot(m, ip)
+	if !ok || attempts != 0 {
+		t.Errorf("attempts after empty credentials = %d (tracked=%v), want 0", attempts, ok)
+	}
+
+	// Only real attempts count: one is below the threshold of 2, the second reports.
+	if m.RecordFailure(ip, "SSH", "root", "") {
+		t.Fatal("first real attempt must only count")
+	}
+	m.RecordFailure(ip, "SSH", "", "") // still ignored for counting
+	if !m.RecordFailure(ip, "SSH", "", "secret") {
+		t.Fatal("second real attempt (empty user, non-empty password) should report")
+	}
+	f.next(t)
+}
+
 func TestRecordFailure_IPsAreTrackedIndependently(t *testing.T) {
 	f := newFake("A")
 	m := newTestManager(2, f)
