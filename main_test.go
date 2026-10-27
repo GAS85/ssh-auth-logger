@@ -1581,6 +1581,8 @@ func installReporter(t *testing.T, threshold int, sanitize func(u, p string) (st
 	)
 	old := abuseReporter
 	abuseReporter = m
+	// The test clients connect from 127.0.0.1, which is skipped by default (see TestAbuse_PrivateIPsAreNotReported).
+	setPrivateAsUsual(t, true)
 	t.Cleanup(func() {
 		abuseReporter = old
 		m.Stop()

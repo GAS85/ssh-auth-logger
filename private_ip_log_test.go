@@ -110,3 +110,41 @@ func TestPrivateIP_SSHLevels(t *testing.T) {
 		}
 	}
 }
+
+func TestReportableIP(t *testing.T) {
+	cases := []struct {
+		ip      string
+		asUsual bool
+		want    bool
+	}{
+		{"203.0.113.9", false, true},
+		{"2001:db8::1", false, true},
+		{"10.1.2.3", false, false},
+		{"192.168.0.7", false, false},
+		{"127.0.0.1", false, false},
+		{"fd12::1", false, false},
+		{"10.1.2.3", true, true},
+		{"127.0.0.1", true, true},
+	}
+	for _, tc := range cases {
+		setPrivateAsUsual(t, tc.asUsual)
+		if got := reportableIP(tc.ip); got != tc.want {
+			t.Errorf("reportableIP(%q, asUsual=%v) = %v, want %v", tc.ip, tc.asUsual, got, tc.want)
+		}
+	}
+}
+
+// With the default LOG_PRIVATE_IPS_AS_USUAL=false, failures from private IPs (here 127.0.0.1) must not reach the abuse backends, for Telnet and SSH alike.
+func TestAbuse_PrivateIPsAreNotReported(t *testing.T) {
+	reports := installReporter(t, 1, nil)
+	setPrivateAsUsual(t, false) // after installReporter, which enables reporting for the other tests
+
+	doTelnetLogin(t, startTelnetServer(t), "admin", "pw")
+	dialSSH(startSSHServer(t), sshClientCfg("root", ssh.Password("toor")))
+
+	select {
+	case r := <-reports:
+		t.Fatalf("private IP was reported: %+v", r)
+	case <-time.After(300 * time.Millisecond):
+	}
+}

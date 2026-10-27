@@ -194,6 +194,11 @@ func attemptLogLevel(src string) logrus.Level {
 	return logrus.InfoLevel
 }
 
+// reportableIP reports whether failures from ip may be counted towards abuse reports. Private, loopback and link-local sources are never sent to reporting services, unless LOG_PRIVATE_IPS_AS_USUAL is set.
+func reportableIP(ip string) bool {
+	return logPrivateIPsAsUsual || !common.IsPrivateIP(ip)
+}
+
 // Telnet handler
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
@@ -256,7 +261,7 @@ func handleTelnetConnection(conn net.Conn) {
 
 	// AbuseIPDB reporting
 	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
-	if err == nil {
+	if err == nil && reportableIP(ip) {
 		abuseReporter.RecordFailure(
 			ip,
 			"Telnet",
@@ -719,7 +724,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 				}).Log(attemptLogLevel(ip), "Request with password")
 
 			// AbuseIPDB reporting
-			if err == nil {
+			if err == nil && reportableIP(ip) {
 				abuseReporter.RecordFailure(
 					ip,
 					"SSH",
@@ -750,7 +755,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 
 			// AbuseIPDB reporting.
 			// Password attempts and public-key attempts both count toward the same IP threshold
-			if err == nil {
+			if err == nil && reportableIP(ip) {
 				abuseReporter.RecordFailure(
 					ip,
 					"SSH",
