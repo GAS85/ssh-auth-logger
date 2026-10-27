@@ -237,6 +237,9 @@ func (b *otxBackend) flushLoop() {
 	}
 }
 
+// Flush submits everything that is queued, without waiting for the batch to fill up or the interval to pass. The Manager calls it on shutdown. If the API cannot be reached the entries stay queued, but the process is about to exit, so they are lost.
+func (b *otxBackend) Flush() { b.flush() }
+
 // stop ends flushLoop and waits for it to exit. Queued entries are not flushed.
 func (b *otxBackend) stop() {
 	b.stopOnce.Do(func() {

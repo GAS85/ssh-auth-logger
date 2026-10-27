@@ -802,3 +802,92 @@ func TestManager_StopOnNilAndWithoutLoop(t *testing.T) {
 	nilM.Stop() // must not panic
 	NewManager(nil, 1, time.Hour, time.Hour, time.Hour).Stop()
 }
+
+// ── Flush ────────────────────────────────────────────────────────────────────
+
+// flushFake collects reports (after an optional delay) and "sends" them on Flush.
+type flushFake struct {
+	*fakeBackend
+	delay time.Duration
+	block chan struct{} // if set, Report waits for it to be closed
+
+	mu      sync.Mutex
+	pending int
+	flushed int
+	calls   int
+}
+
+func (f *flushFake) Report(Report) {
+	if f.block != nil {
+		<-f.block
+	}
+	time.Sleep(f.delay)
+	f.mu.Lock()
+	f.pending++
+	f.mu.Unlock()
+}
+
+func (f *flushFake) Flush() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.flushed += f.pending
+	f.pending = 0
+}
+
+func (f *flushFake) stats() (flushed, calls int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.flushed, f.calls
+}
+
+func TestFlush_NilManagerAndNoBackends(t *testing.T) {
+	var nilM *Manager
+	nilM.Flush(time.Second) // must not panic
+	stoppable(t, newTestManager(1)).Flush(time.Second)
+}
+
+func TestFlush_OnlyFlusherBackendsAreCalled(t *testing.T) {
+	plain := newFake("plain") // does not implement Flusher
+	f := &flushFake{fakeBackend: newFake("batching")}
+	m := stoppable(t, newTestManager(1, plain, f))
+
+	m.Flush(time.Second)
+
+	if _, calls := f.stats(); calls != 1 {
+		t.Errorf("Flush called %d times, want 1", calls)
+	}
+}
+
+// A report that was triggered just before shutdown is still being handed to its backend; Flush has to wait for it.
+func TestFlush_WaitsForReportsInFlight(t *testing.T) {
+	f := &flushFake{fakeBackend: newFake("batching"), delay: 100 * time.Millisecond}
+	m := stoppable(t, newTestManager(1, f))
+
+	if !m.RecordFailure("192.0.2.90", "SSH", "root", "pw") {
+		t.Fatal("report not triggered")
+	}
+	m.Flush(2 * time.Second)
+
+	if flushed, _ := f.stats(); flushed != 1 {
+		t.Errorf("flushed %d reports, want the one that was in flight", flushed)
+	}
+}
+
+func TestFlush_TimesOutInsteadOfBlockingShutdown(t *testing.T) {
+	hook := captureLogs(t)
+	f := &flushFake{fakeBackend: newFake("stuck"), block: make(chan struct{})}
+	t.Cleanup(func() { close(f.block) })
+	m := stoppable(t, newTestManager(1, f))
+
+	m.RecordFailure("192.0.2.91", "SSH", "root", "pw") // Report never returns
+
+	start := time.Now()
+	m.Flush(100 * time.Millisecond)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("Flush took %v, want it to give up after the timeout", d)
+	}
+	if hook.find("flush on shutdown timed out") == nil {
+		t.Error("expected a warning that the flush timed out")
+	}
+}

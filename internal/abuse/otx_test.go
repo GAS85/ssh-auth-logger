@@ -733,3 +733,60 @@ func TestOTX_ReferenceNotSentWhenAppendingToExistingPulse(t *testing.T) {
 		t.Errorf("an existing pulse must not be touched beyond its indicators: %s", reqs[0].raw)
 	}
 }
+
+// ── flush on shutdown ────────────────────────────────────────────────────────
+
+var _ Flusher = (*otxBackend)(nil)
+
+func TestOTX_FlushSendsPartialBatch(t *testing.T) {
+	srv := newOTXServer(t)
+	b := newOTXForTest(srv.URL, func(b *otxBackend) { b.batchSize = 100 })
+
+	b.Report(otxRep("198.51.100.1", "SSH"))
+	if len(srv.requests()) != 0 {
+		t.Fatal("batch is far from full, nothing may be sent yet")
+	}
+
+	b.Flush()
+
+	reqs := srv.requests()
+	if len(reqs) != 1 || reqs[0].method != http.MethodPost {
+		t.Fatalf("requests = %+v, want one pulse create", reqs)
+	}
+	if got := reqs[0].create(t).Indicators; len(got) != 1 || got[0].Indicator != "198.51.100.1" {
+		t.Errorf("indicators = %+v", got)
+	}
+	if len(b.queued()) != 0 {
+		t.Error("queue should be empty after Flush")
+	}
+}
+
+func TestOTX_FlushWithEmptyQueueSendsNothing(t *testing.T) {
+	srv := newOTXServer(t)
+	b := newOTXForTest(srv.URL)
+	b.Flush()
+	if len(srv.requests()) != 0 {
+		t.Error("empty queue must not hit the API")
+	}
+}
+
+// The whole chain used on SIGTERM: a report that was just triggered by the Manager must still be in the request.
+func TestOTX_ManagerFlushSendsReportTriggeredJustBefore(t *testing.T) {
+	srv := newOTXServer(t)
+	ob := newOTXForTest(srv.URL, func(b *otxBackend) { b.batchSize = 100 })
+	m := NewManager([]Backend{ob}, 1, time.Minute, time.Hour, time.Hour)
+	t.Cleanup(m.Stop)
+
+	if !m.RecordFailure("198.51.100.9", "SSH", "root", "pw") {
+		t.Fatal("report not triggered")
+	}
+	m.Flush(2 * time.Second)
+
+	reqs := srv.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("got %d requests, want 1", len(reqs))
+	}
+	if got := reqs[0].create(t).Indicators; len(got) != 1 || got[0].Indicator != "198.51.100.9" {
+		t.Errorf("indicators = %+v", got)
+	}
+}

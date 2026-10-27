@@ -30,6 +30,9 @@ const (
 	appBuild   = "__none__"
 	appLicense = "MIT"
 	appSource  = "https://github.com/GAS85/ssh-auth-logger"
+
+	// shutdownFlushTimeout bounds how long SIGTERM/SIGINT waits for batching abuse backends to send their queue. It stays below the 10s that Docker and systemd give a container or service before killing it.
+	shutdownFlushTimeout = 8 * time.Second
 )
 
 var (
@@ -1076,5 +1079,9 @@ func main() {
 	}()
 
 	// Block until SIGTERM/SIGINT, then log the run statistics and exit.
-	common.HandleShutdown(common.NotifyShutdown(), logDest.Startup, appName, stats, abuseReporter, os.Exit)
+	// Before exiting, backends that batch their reports (OTX) send what they have collected, otherwise it would be lost.
+	common.HandleShutdown(common.NotifyShutdown(), logDest.Startup, appName, stats, abuseReporter, func(code int) {
+		abuseReporter.Flush(shutdownFlushTimeout)
+		os.Exit(code)
+	})
 }
