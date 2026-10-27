@@ -570,3 +570,23 @@ exit 0
 
 - As advantage you do not need to enable and expose stats endpoint.
 - As disadvantage - it is more complicated and CPU consuming.
+
+## Dozzle alerting integration
+
+Per default connections and password guessing from private IP ranges will case log level `warning` and `error` messages, unless you set `LOG_PRIVATE_IPS_AS_USUAL=true`. It is very important to know immediatly that you can be attacked from inside of the network now.
+
+![Logs example with private IP ranges](https://github.com/user-attachments/assets/b87c2131-0ee0-4bc1-846f-161bce41cc1f)
+
+To setup Alerting in dozzle, please create a new Alert with following settings:
+
+1. Alert type - Log Alert.
+2. Containers - `name contains "ssh-auth-logger"` or whatever name you choise for the service.
+3. Log condition - `level == "error" || level == "warn"`.
+4. Setup your [destination](https://dozzle.dev/guide/alerts-and-webhooks#setting-up-a-destination) and Alert name.
+5. Save it.
+
+### Dozzle Alert example
+
+![Dozzle Alet example](https://github.com/user-attachments/assets/c123fac6-edd2-4026-84c6-bf5d53089d4b)
+
+Now if you keep `LOG_PRIVATE_IPS_AS_USUAL=false` in case connections or password guessing attempts from IP address in private network you will get an alert notification.
