@@ -885,12 +885,13 @@ func init() {
 
 	// Log destination: LOG_TO=console (default), file or both. Until the startup message is out, everything is also written to the console (see logOutputs), so the configuration is always visible there; afterwards only LOG_TO decides.
 	logFilePath := getEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
-	logOut, err := common.SetupLogOutput(getEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stderr)
+	// On the console, info and debug lines go to stdout, warnings and above to stderr; a log file gets both.
+	logOut, err := common.SetupLogOutput(getEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stdout, os.Stderr)
 	if err != nil {
 		logrus.Fatal(err)
 	}
 	logDest = logOut
-	logrus.SetOutput(logOut.Startup)
+	logOut.UseStartup(logrus.StandardLogger())
 
 	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
 
@@ -1009,7 +1010,7 @@ func init() {
 	logrus.WithFields(startupFields).Info("Starting SSH Auth Logger")
 
 	// Startup is done: from here on only the destination chosen with LOG_TO is used.
-	logrus.SetOutput(logOut.Runtime)
+	logOut.UseRuntime(logrus.StandardLogger())
 
 	// Configure allowed log fields from environment variable
 	if logsEnv != "" {

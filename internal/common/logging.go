@@ -6,6 +6,9 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus/hooks/writer"
 )
 
 // Log destinations selectable with LOG_TO.
@@ -27,27 +30,35 @@ func ParseLogTo(value string) (string, error) {
 	}
 }
 
-// LogOutputs holds the writers logrus is pointed at over the process lifetime.
+// Log lines are split by level: info and debug (the normal operation: connections, login attempts, startup message, statistics) go to one writer, warnings and everything worse to another. On the console these are stdout and stderr.
+var (
+	severeLevels = []logrus.Level{logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel, logrus.WarnLevel}
+	normalLevels = []logrus.Level{logrus.InfoLevel, logrus.DebugLevel, logrus.TraceLevel}
+)
+
+// LogOutputs holds the writers logrus is pointed at over the process lifetime. Each phase has two: the plain one receives info and debug lines, the *Err one warnings and above.
 type LogOutputs struct {
 	// Mode is the normalised LOG_TO value: console, file or both.
 	Mode string
-	// Startup receives everything logged while the application initialises, including the startup message with all settings. It always includes the console, and in addition the file if a file was requested, so the configuration is visible on the console even with LOG_TO=file.
-	Startup io.Writer
-	// Runtime receives all later log lines, as selected by LOG_TO.
-	Runtime io.Writer
+	// Startup and StartupErr receive everything logged while the application initialises, including the startup message with all settings. They always include the console, and in addition the file if a file was requested, so the configuration is visible on the console even with LOG_TO=file. The startup message itself is an info line, so it is written to Startup.
+	Startup    io.Writer
+	StartupErr io.Writer
+	// Runtime and RuntimeErr receive all later log lines, as selected by LOG_TO.
+	Runtime    io.Writer
+	RuntimeErr io.Writer
 	// File is the log file writer, nil if LOG_TO=console.
 	File *reopenFileWriter
 }
 
-// SetupLogOutput builds the writers for the given LOG_TO / LOG_FILE_PATH values. console is where "console" output goes (os.Stderr in production, as logrus does by default).
-func SetupLogOutput(logTo, filePath string, console io.Writer) (*LogOutputs, error) {
+// SetupLogOutput builds the writers for the given LOG_TO / LOG_FILE_PATH values. stdout and stderr are where "console" output goes (os.Stdout and os.Stderr in production): info and debug lines to stdout, warnings and above to stderr. A log file gets both kinds.
+func SetupLogOutput(logTo, filePath string, stdout, stderr io.Writer) (*LogOutputs, error) {
 	mode, err := ParseLogTo(logTo)
 	if err != nil {
 		return nil, err
 	}
 
 	if mode == LogToConsole {
-		return &LogOutputs{Mode: mode, Startup: console, Runtime: console}, nil
+		return &LogOutputs{Mode: mode, Startup: stdout, StartupErr: stderr, Runtime: stdout, RuntimeErr: stderr}, nil
 	}
 
 	if strings.TrimSpace(filePath) == "" {
@@ -59,13 +70,27 @@ func SetupLogOutput(logTo, filePath string, console io.Writer) (*LogOutputs, err
 		return nil, fmt.Errorf("cannot open LOG_FILE_PATH: %w", err)
 	}
 
-	both := multiWriter{console, file}
+	bothOut, bothErr := multiWriter{stdout, file}, multiWriter{stderr, file}
 	if mode == logToBoth {
-		return &LogOutputs{Mode: mode, Startup: both, Runtime: both, File: file}, nil
+		return &LogOutputs{Mode: mode, Startup: bothOut, StartupErr: bothErr, Runtime: bothOut, RuntimeErr: bothErr, File: file}, nil
 	}
 
 	// mode == file: console only gets the startup output.
-	return &LogOutputs{Mode: mode, Startup: both, Runtime: file, File: file}, nil
+	return &LogOutputs{Mode: mode, Startup: bothOut, StartupErr: bothErr, Runtime: file, RuntimeErr: file, File: file}, nil
+}
+
+// UseStartup points l at the startup writers: output of level info and below to Startup, warnings and above to StartupErr.
+func (o *LogOutputs) UseStartup(l *logrus.Logger) { routeByLevel(l, o.Startup, o.StartupErr) }
+
+// UseRuntime points l at the runtime writers, as selected by LOG_TO. It replaces the routing set up by UseStartup.
+func (o *LogOutputs) UseRuntime(l *logrus.Logger) { routeByLevel(l, o.Runtime, o.RuntimeErr) }
+
+// routeByLevel sends info/debug/trace entries of l to normal and warn/error/fatal/panic entries to severe. It uses logrus writer hooks, so the logger's own output is switched off: every entry is delivered by exactly one hook. Any other hook of l is removed.
+func routeByLevel(l *logrus.Logger, normal, severe io.Writer) {
+	l.SetOutput(io.Discard)
+	l.ReplaceHooks(make(logrus.LevelHooks))
+	l.AddHook(&writer.Hook{Writer: severe, LogLevels: severeLevels})
+	l.AddHook(&writer.Hook{Writer: normal, LogLevels: normalLevels})
 }
 
 // multiWriter writes to every writer, even if an earlier one fails (unlike io.MultiWriter). A broken console must not stop file logging and vice versa. It returns the first error seen.
