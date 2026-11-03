@@ -585,6 +585,9 @@ To setup Alerting in dozzle, please create a new Alert with following settings:
 4. Setup your [destination](https://dozzle.dev/guide/alerts-and-webhooks#setting-up-a-destination) and Alert name.
 5. Save it.
 
+> [!NOTE]
+> You will also recieve notification on connections error to 3rd party services, e.g. IP reputation check by abuseipdp.
+
 ### Dozzle Alert example
 
 ![Dozzle Alet example](https://github.com/user-attachments/assets/c123fac6-edd2-4026-84c6-bf5d53089d4b)
