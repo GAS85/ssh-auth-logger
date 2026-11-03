@@ -2,7 +2,6 @@
 
 // Everything that comes from the log (addresses, user names, passwords, ...) is attacker controlled. It is only ever put into the page with textContent, never as HTML.
 
-const REFRESH_MS = 5000;
 const SVGNS = "http://www.w3.org/2000/svg";
 
 function el(tag, text, cls) {
@@ -297,6 +296,7 @@ function renderTable(id, columns, rows, emptyText) {
 }
 
 function renderTables(data) {
+  const rows = settings.rows;
   renderTable("events", [
     { title: "Time", value: (r) => when(r.time) },
     { title: "Protocol", value: (r) => r.protocol },
@@ -304,8 +304,8 @@ function renderTables(data) {
     { title: "Country", value: (r) => (r.countryCode ? r.countryCode + (r.country ? " – " + r.country : "") : "—") },
     { title: "Abuse score", value: (r) => (r.abuseConfidenceScore ?? "—") },
     { title: "Reports", value: (r) => (r.totalReports ?? "—") },
-    { title: "Event", value: (r) => r.msg },
-  ], data.connections || [], "No events yet");
+    { title: "Event", value: (r) => r.msg + (r.backends ? " → " + r.backends : "") },
+  ], (data.connections || []).slice(0, rows), "No events yet");
 
   renderTable("attempts", [
     { title: "Time", value: (r) => when(r.time) },
@@ -313,7 +313,58 @@ function renderTables(data) {
     { title: "Source", value: (r) => r.src, link: (r) => abuseIpdbUrl(r.src), cls: "mono" },
     { title: "User", value: (r) => r.username, cls: "wrap mono" },
     { title: "Password / key", value: (r) => (r.type === "password" ? r.password : (r.keytype || "key") + " " + (r.fingerprint || "")), cls: "wrap mono" },
-  ], data.attempts || [], "No credentials yet");
+  ], (data.attempts || []).slice(0, rows), "No credentials yet");
+}
+
+// ── settings (row count, refresh interval) ───────────────────────────────────
+
+const ROW_CHOICES = [10, 20, 50];
+const REFRESH_CHOICES = [5, 10, 15, 30]; // seconds
+const settings = { rows: 10, refreshSeconds: 5 };
+
+function loadSetting(key, choices, fallback) {
+  try {
+    const v = Number(localStorage.getItem("dashboard." + key));
+    if (choices.includes(v)) return v;
+  } catch {} // storage can be unavailable (private window, blocked)
+  return fallback;
+}
+
+function saveSetting(key, value) {
+  try { localStorage.setItem("dashboard." + key, String(value)); } catch {}
+}
+
+let lastData = null;
+let timer = null;
+
+function scheduleRefresh() {
+  clearTimeout(timer);
+  // The next run is planned after the previous one has finished, so slow responses never pile up.
+  timer = setTimeout(refresh, settings.refreshSeconds * 1000);
+}
+
+function initControls() {
+  settings.rows = loadSetting("rows", ROW_CHOICES, 10);
+  settings.refreshSeconds = loadSetting("refresh", REFRESH_CHOICES, 5);
+
+  const rowsSel = document.getElementById("rows");
+  const refreshSel = document.getElementById("refresh");
+  for (const n of ROW_CHOICES) rowsSel.appendChild(new Option("Last " + n, n));
+  for (const n of REFRESH_CHOICES) refreshSel.appendChild(new Option("Every " + n + " s", n));
+  rowsSel.value = String(settings.rows);
+  refreshSel.value = String(settings.refreshSeconds);
+
+  rowsSel.addEventListener("change", () => {
+    settings.rows = Number(rowsSel.value);
+    saveSetting("rows", settings.rows);
+    if (lastData) renderTables(lastData); // the data is already here, no need to fetch again
+  });
+  refreshSel.addEventListener("change", () => {
+    settings.refreshSeconds = Number(refreshSel.value);
+    saveSetting("refresh", settings.refreshSeconds);
+    clearTimeout(timer);
+    refresh(); // applies the new interval at once and schedules the next run with it
+  });
 }
 
 // ── refresh loop ─────────────────────────────────────────────────────────────
@@ -341,14 +392,17 @@ async function refresh() {
     renderMap(data);
     renderTimeline(data);
     renderTables(data);
+    lastData = data;
     status.textContent = "Last updated: " + new Date().toLocaleTimeString();
   } catch (e) {
     status.textContent = "Dashboard error: " + e.message;
+  } finally {
+    scheduleRefresh();
   }
 }
 
 (async () => {
+  initControls();
   await initMap(); // the map assets are cached by the browser; only the first load waits for them
   refresh();
-  setInterval(refresh, REFRESH_MS);
 })();

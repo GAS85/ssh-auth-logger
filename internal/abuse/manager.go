@@ -89,6 +89,12 @@ type Backend interface {
 	Report(rep Report)
 }
 
+// Flusher is optionally implemented by a Backend that collects reports and sends them later in batches. Manager.Flush calls it on shutdown, so what was collected is not lost with the process.
+type Flusher interface {
+	// Flush sends everything collected so far. It may block on network I/O.
+	Flush()
+}
+
 // Reputation is what a reputation service knows about an IP.
 type Reputation struct {
 	CountryCode          string // ISO 3166 alpha-2 code, empty if unknown
@@ -146,6 +152,9 @@ type Manager struct {
 	// Report statistics. reportsTriggered counts threshold events (one per IP report); sent counts the dispatches to each backend (same index as backends). A dispatch is the hand-over to the backend, not a confirmed delivery: Backend.Report has no result.
 	reportsTriggered atomic.Uint64
 	sent             []atomic.Uint64
+
+	// inflight counts Backend.Report calls that have been started but have not returned yet; Flush waits for them.
+	inflight atomic.Int64
 
 	done     chan struct{} // closed by Stop
 	loopDone chan struct{} // closed when cleanupLoop has exited (nil if no loop was started)
@@ -228,6 +237,7 @@ func (m *Manager) Stop() {
 
 // RecordFailure records a failed authentication attempt.
 // Once the configured number of attempts has been reached, the IP is reported asynchronously to every enabled backend.
+// Attempts with an empty username and an empty password do not count towards the threshold.
 // Returns true if this call caused a report to be scheduled.
 func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 	// A nil Manager (Setup never called) is a harmless no-op.
@@ -260,6 +270,12 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 
 	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
 	if !state.lastReported.IsZero() && now.Sub(state.lastReported) < m.reportEvery {
+		m.mu.Unlock()
+		return false
+	}
+
+	// An attempt with both an empty username and an empty password (judged on the raw input, before any backend sanitizing) is still remembered above, but it does not count towards the report threshold and can never trigger a report on its own.
+	if username == "" && password == "" {
 		m.mu.Unlock()
 		return false
 	}
@@ -300,10 +316,56 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 	m.reportsTriggered.Add(1)
 	for i, b := range m.backends {
 		m.sent[i].Add(1)
-		go b.Report(Report{IP: ip, Protocol: protocol, Creds: snapshots[i]})
+		m.inflight.Add(1)
+		go func(b Backend, rep Report) {
+			defer m.inflight.Add(-1)
+			b.Report(rep)
+		}(b, Report{IP: ip, Protocol: protocol, Creds: snapshots[i]})
 	}
 
 	return true
+}
+
+// Flush hands everything that backends have collected but not sent yet to their service (see Flusher). Call it on shutdown, e.g. after SIGTERM, before the process exits.
+//
+// Reports that were just triggered are given time to reach their backend first. Flush returns once all backends are done, or after timeout (so a slow service cannot block the shutdown); whatever is not sent by then is lost.
+func (m *Manager) Flush(timeout time.Duration) {
+	if m == nil {
+		return
+	}
+
+	deadline := time.Now().Add(timeout)
+
+	// Backend.Report calls that are still running may add to a queue.
+	for m.inflight.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	var wg sync.WaitGroup
+	for _, b := range m.backends {
+		f, ok := b.(Flusher)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func(name string, f Flusher) {
+			defer wg.Done()
+			logger.WithField("backend", name).Debug("Abuse: flushing collected reports")
+			f.Flush()
+		}(b.Name(), f)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Until(deadline)):
+		logger.WithField("timeout", timeout.String()).Warn("Abuse: flush on shutdown timed out, unsent reports are lost")
+	}
 }
 
 // ReputationFields returns the cached IP reputation as log fields (countryCode, abuseConfidenceScore, totalReports), or nil if there is nothing to show.

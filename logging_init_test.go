@@ -21,13 +21,15 @@ func readTestFile(t *testing.T, path string) string {
 
 // ── init() wiring, run in a subprocess ───────────────────────────────────────
 //
-// init() has already run in this process, so the real startup path is exercised by re-running the test binary with LOG_TO / LOG_FILE_PATH set. The child logs one runtime line and exits.
+// init() has already run in this process, so the real startup path is exercised by re-running the test binary with LOG_TO / LOG_FILE_PATH set. The child logs one line per level and exits.
 
 const logHelperEnv = "SSH_AUTH_LOGGER_LOG_HELPER"
 
 const (
 	startupMarker = "Starting SSH Auth Logger"
-	runtimeMarker = "runtime-marker"
+	runtimeMarker = "runtime-marker" // logged as info
+	warnMarker    = "warn-marker"
+	errorMarker   = "error-marker"
 )
 
 func TestLogToHelperProcess(t *testing.T) {
@@ -35,10 +37,15 @@ func TestLogToHelperProcess(t *testing.T) {
 		t.Skip("only used as a subprocess by the TestInit_LogTo tests")
 	}
 	logger.Info(runtimeMarker)
+	logger.Warn(warnMarker)
+	logger.Error(errorMarker)
 }
 
-// runInitHelper runs the helper with the given extra environment and returns what it wrote to the console (stderr) and how it exited.
-func runInitHelper(t *testing.T, env ...string) (stderr string, err error) {
+// helperOutput is what the child process wrote to its two console streams.
+type helperOutput struct{ stdout, stderr string }
+
+// runInitHelper runs the helper with the given extra environment and returns what it wrote to stdout and stderr and how it exited.
+func runInitHelper(t *testing.T, env ...string) (out helperOutput, err error) {
 	t.Helper()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestLogToHelperProcess$", "-test.count=1")
@@ -46,10 +53,11 @@ func runInitHelper(t *testing.T, env ...string) (stderr string, err error) {
 	cmd.Env = append(os.Environ(), logHelperEnv+"=1", "LOG_TO=", "LOG_FILE_PATH=")
 	cmd.Env = append(cmd.Env, env...)
 
-	var errBuf bytes.Buffer
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 	err = cmd.Run()
-	return errBuf.String(), err
+	return helperOutput{stdout: outBuf.String(), stderr: errBuf.String()}, err
 }
 
 // startupEntry finds the startup line in the log output and decodes it.
@@ -68,30 +76,46 @@ func startupEntry(t *testing.T, output string) map[string]any {
 	return nil
 }
 
+// expect checks that every want is in text and no notWant is.
+func expect(t *testing.T, name, text string, want, notWant []string) {
+	t.Helper()
+	for _, m := range want {
+		if !strings.Contains(text, m) {
+			t.Errorf("%s should contain %q:\n%s", name, m, text)
+		}
+	}
+	for _, m := range notWant {
+		if strings.Contains(text, m) {
+			t.Errorf("%s must not contain %q:\n%s", name, m, text)
+		}
+	}
+}
+
+// Info and debug lines (including the startup message) go to stdout, warnings and errors to stderr.
 func TestInit_LogToConsole(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 
-	stderr, err := runInitHelper(t, "LOG_TO=console", "LOG_FILE_PATH="+path)
+	out, err := runInitHelper(t, "LOG_TO=console", "LOG_FILE_PATH="+path)
 	if err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, stderr)
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
 	}
-	if !strings.Contains(stderr, startupMarker) || !strings.Contains(stderr, runtimeMarker) {
-		t.Errorf("console must have startup and runtime output:\n%s", stderr)
-	}
+	expect(t, "stdout", out.stdout, []string{startupMarker, runtimeMarker}, []string{warnMarker, errorMarker})
+	expect(t, "stderr", out.stderr, []string{warnMarker, errorMarker}, []string{startupMarker, runtimeMarker})
+
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("no file may be created for LOG_TO=console (stat err: %v)", err)
 	}
 }
 
 func TestInit_DefaultIsConsole(t *testing.T) {
-	stderr, err := runInitHelper(t)
+	out, err := runInitHelper(t)
 	if err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, stderr)
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
 	}
-	if !strings.Contains(stderr, startupMarker) || !strings.Contains(stderr, runtimeMarker) {
-		t.Errorf("console must have startup and runtime output:\n%s", stderr)
-	}
-	if got := startupEntry(t, stderr)["logging"].(map[string]any)["LOG_TO"]; got != "console" {
+	expect(t, "stdout", out.stdout, []string{startupMarker, runtimeMarker}, []string{warnMarker})
+	expect(t, "stderr", out.stderr, []string{warnMarker}, []string{startupMarker, runtimeMarker})
+
+	if got := startupEntry(t, out.stdout)["logging"].(map[string]any)["LOG_TO"]; got != "console" {
 		t.Errorf("startup LOG_TO = %v, want console", got)
 	}
 }
@@ -99,27 +123,24 @@ func TestInit_DefaultIsConsole(t *testing.T) {
 func TestInit_LogToFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 
-	stderr, err := runInitHelper(t, "LOG_TO=file", "LOG_FILE_PATH="+path)
+	out, err := runInitHelper(t, "LOG_TO=file", "LOG_FILE_PATH="+path)
 	if err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, stderr)
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
 	}
 
-	// Console: the startup message with all settings, but not the runtime line.
-	if !strings.Contains(stderr, startupMarker) {
-		t.Errorf("startup message must be shown on the console even with LOG_TO=file:\n%s", stderr)
-	}
-	if strings.Contains(stderr, runtimeMarker) {
-		t.Errorf("runtime output must not reach the console with LOG_TO=file:\n%s", stderr)
-	}
+	// Console: only the startup message with all settings (stdout, it is an info line). Nothing of the runtime output, whatever its level.
+	expect(t, "stdout", out.stdout, []string{startupMarker}, []string{runtimeMarker, warnMarker, errorMarker})
+	expect(t, "stderr", out.stderr, nil, []string{startupMarker, runtimeMarker, warnMarker, errorMarker})
 
-	// File: startup message and runtime line.
+	// File: startup message and every runtime line.
 	content := readTestFile(t, path)
-	if strings.Count(content, startupMarker) != 1 || !strings.Contains(content, runtimeMarker) {
-		t.Errorf("file must have the startup message once and the runtime line:\n%s", content)
+	if strings.Count(content, startupMarker) != 1 {
+		t.Errorf("file must have the startup message exactly once:\n%s", content)
 	}
+	expect(t, "file", content, []string{runtimeMarker, warnMarker, errorMarker}, nil)
 
 	// Both copies of the startup message carry all settings, including the new ones.
-	for name, text := range map[string]string{"console": stderr, "file": content} {
+	for name, text := range map[string]string{"console": out.stdout, "file": content} {
 		entry := startupEntry(t, text)
 		logging, _ := entry["logging"].(map[string]any)
 		if logging["LOG_TO"] != "file" || logging["LOG_FILE_PATH"] != path {
@@ -137,18 +158,25 @@ func TestInit_LogToFile(t *testing.T) {
 func TestInit_LogToBoth(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 
-	stderr, err := runInitHelper(t, "LOG_TO=both", "LOG_FILE_PATH="+path)
+	out, err := runInitHelper(t, "LOG_TO=both", "LOG_FILE_PATH="+path)
 	if err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, stderr)
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
 	}
 	content := readTestFile(t, path)
 
-	for name, text := range map[string]string{"console": stderr, "file": content} {
+	// Each line appears once per destination, on the stream of its level.
+	expect(t, "stdout", out.stdout, []string{startupMarker, runtimeMarker}, []string{warnMarker, errorMarker})
+	expect(t, "stderr", out.stderr, []string{warnMarker, errorMarker}, []string{startupMarker, runtimeMarker})
+	expect(t, "file", content, []string{startupMarker, runtimeMarker, warnMarker, errorMarker}, nil)
+
+	for name, text := range map[string]string{"stdout": out.stdout, "file": content} {
 		if n := strings.Count(text, startupMarker); n != 1 {
 			t.Errorf("%s: startup message appears %d times, want exactly once", name, n)
 		}
-		if !strings.Contains(text, runtimeMarker) {
-			t.Errorf("%s: runtime line missing", name)
+	}
+	for name, text := range map[string]string{"stderr": out.stderr, "file": content} {
+		if n := strings.Count(text, warnMarker); n != 1 {
+			t.Errorf("%s: warning appears %d times, want exactly once", name, n)
 		}
 	}
 }
@@ -159,8 +187,8 @@ func TestInit_LogToFile_AppendsToExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if stderr, err := runInitHelper(t, "LOG_TO=file", "LOG_FILE_PATH="+path); err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, stderr)
+	if out, err := runInitHelper(t, "LOG_TO=file", "LOG_FILE_PATH="+path); err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
 	}
 
 	content := readTestFile(t, path)
@@ -169,16 +197,19 @@ func TestInit_LogToFile_AppendsToExistingFile(t *testing.T) {
 	}
 }
 
-// A fatal configuration error after the output is set up must be visible on the console, even though LOG_TO=file would send it to the file only.
+// A fatal configuration error after the output is set up must be visible on the console (stderr), even though LOG_TO=file would send runtime output to the file only.
 func TestInit_FatalErrorIsShownOnConsoleAndInFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 
-	stderr, err := runInitHelper(t, "LOG_TO=file", "LOG_FILE_PATH="+path, "SSHD_RATE=not-a-number")
+	out, err := runInitHelper(t, "LOG_TO=file", "LOG_FILE_PATH="+path, "SSHD_RATE=not-a-number")
 	if err == nil {
 		t.Fatal("expected the helper to exit with an error")
 	}
-	if !strings.Contains(stderr, "Invalid SSHD_RATE") {
-		t.Errorf("console must show the fatal error:\n%s", stderr)
+	if !strings.Contains(out.stderr, "Invalid SSHD_RATE") {
+		t.Errorf("stderr must show the fatal error:\n%s", out.stderr)
+	}
+	if strings.Contains(out.stdout, "Invalid SSHD_RATE") {
+		t.Errorf("a fatal error must not go to stdout:\n%s", out.stdout)
 	}
 	if !strings.Contains(readTestFile(t, path), "Invalid SSHD_RATE") {
 		t.Error("file should have the fatal error as well")
@@ -200,14 +231,14 @@ func TestInit_InvalidConfigurationIsFatal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stderr, err := runInitHelper(t, tc.env...)
+			out, err := runInitHelper(t, tc.env...)
 			if err == nil {
-				t.Fatalf("expected a non-zero exit, output:\n%s", stderr)
+				t.Fatalf("expected a non-zero exit, output:\n%s\n%s", out.stdout, out.stderr)
 			}
-			if !strings.Contains(stderr, tc.wantInErr) {
-				t.Errorf("console should mention %q:\n%s", tc.wantInErr, stderr)
+			if !strings.Contains(out.stderr, tc.wantInErr) {
+				t.Errorf("stderr should mention %q:\n%s", tc.wantInErr, out.stderr)
 			}
-			if strings.Contains(stderr, startupMarker) {
+			if strings.Contains(out.stdout+out.stderr, startupMarker) {
 				t.Error("must not start up with an invalid log configuration")
 			}
 		})

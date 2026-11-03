@@ -92,19 +92,45 @@ jobs:
         # https://github.com/actions/checkout/releases/tag/v6.0.2
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - name: Prepare image name
-        id: repo
-        run: echo "REPO=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+      - name: Set metadata
+        id: meta
+        run: |
+          echo "VERSION=dev" >> $GITHUB_OUTPUT
+          echo "LABEL_IMAGE_URL=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Run Trivy vulnerability scanner
         # https://github.com/aquasecurity/trivy-action/releases/tag/v0.36.0
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
-          image-ref: "docker.io/${{ steps.repo.outputs.REPO }}:dev"
+          image-ref: "docker.io/${{ steps.meta.outputs.LABEL_IMAGE_URL }}:${{ steps.meta.outputs.VERSION }}"
           format: "template"
           template: "@/contrib/sarif.tpl"
           output: "trivy-results.sarif"
           severity: "CRITICAL,HIGH"
+
+      - name: Run Trivy vulnerability scanner - direct output
+        # https://github.com/aquasecurity/trivy-action/releases/tag/v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: "docker.io/${{ steps.meta.outputs.LABEL_IMAGE_URL }}:${{ steps.meta.outputs.VERSION }}"
+          severity: "MEDIUM,LOW,UNKNOWN"
+
+      - name: Run Trivy vulnerability scanner - webui
+        # https://github.com/aquasecurity/trivy-action/releases/tag/v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: "docker.io/${{ steps.meta.outputs.LABEL_IMAGE_URL }}:${{ steps.meta.outputs.VERSION }}-webui"
+          format: "template"
+          template: "@/contrib/sarif.tpl"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+
+      - name: Run Trivy vulnerability scanner - direct output - webui
+        # https://github.com/aquasecurity/trivy-action/releases/tag/v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: "docker.io/${{ steps.meta.outputs.LABEL_IMAGE_URL }}:${{ steps.meta.outputs.VERSION }}-webui"
+          severity: "MEDIUM,LOW,UNKNOWN"
 
       - name: Upload Trivy scan results to GitHub Security tab
         # https://github.com/github/codeql-action/releases/tag/v4.35.5

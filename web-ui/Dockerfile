@@ -9,6 +9,8 @@ ARG VERSION=dev
 ARG VCS_REF=dev
 ARG BUILD_DATE=unknown
 
+ENV DASHBOARD_PORT=$DASHBOARD_PORT
+
 LABEL maintainer="GAS85" \
       org.opencontainers.image.title="ssh-auth-logger" \
       org.opencontainers.image.description="A low/zero interaction ssh authentication logging honeypot" \
@@ -24,5 +26,12 @@ COPY . .
 
 # Run Tests
 RUN node --test test.js
+
+HEALTHCHECK \
+    --interval=5m \
+    --timeout=5s \
+    --retries=1 \
+    --start-period=5s \
+    CMD ["sh", "-c", "wget --spider http://127.0.0.1:$DASHBOARD_PORT"]
 
 CMD node server.js

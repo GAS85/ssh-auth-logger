@@ -7,3 +7,4 @@ Dockerfile
 internal/*/*_test.go
 web-ui
 docker-compose.yml
+goTest.sh

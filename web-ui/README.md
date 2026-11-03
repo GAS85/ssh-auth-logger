@@ -35,7 +35,7 @@ services:
     #   context: ./web-ui
     environment:
       # Following are default values
-      # - PORT=8081                                   # Port to listen to
+      # - DASHBOARD_PORT=8081                                   # Port to listen to
       - DASHBOARD_BIND=0.0.0.0                        # Listen on localhost unless told otherwise. Set it to 0.0.0.0 to enable access from container
       # - MY_LOCATION=CH                              # Your country location Alpha-2
       # - STATS_URL=http://127.0.0.1:8080/stats       # Stats URL of the Honeypot
@@ -48,6 +48,13 @@ services:
       # Share log file, otherwise no passwords and IPs will be shown
       - ./ssh-auth-logger:/var/log
     restart: unless-stopped
+    healthcheck:
+      # As we are sharing network with ssh-auth-logger. We have to test if connection logger-->webUI still works
+      test: wget --spider http://ssh-auth-logger:8081 || exit 1
+      interval: 5m00s
+      timeout: 5s
+      retries: 1
+      start_period: 5s
     deploy:
       resources:
         limits:

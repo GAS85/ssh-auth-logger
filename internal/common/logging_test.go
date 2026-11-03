@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -342,7 +343,7 @@ func TestSetupLogOutput_Console(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 
 	// A LOG_FILE_PATH is ignored (and not created) in console mode.
-	out, err := SetupLogOutput("console", path, &console)
+	out, err := SetupLogOutput("console", path, &console, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +363,7 @@ func TestSetupLogOutput_Console(t *testing.T) {
 
 func TestSetupLogOutput_EmptyMeansConsole(t *testing.T) {
 	var console bytes.Buffer
-	out, err := SetupLogOutput("", "", &console)
+	out, err := SetupLogOutput("", "", &console, io.Discard)
 	if err != nil || out.Mode != "console" {
 		t.Fatalf("out=%+v err=%v", out, err)
 	}
@@ -373,7 +374,7 @@ func TestSetupLogOutput_FileMode(t *testing.T) {
 	var console bytes.Buffer
 	path := filepath.Join(t.TempDir(), "app.log")
 
-	out, err := SetupLogOutput("file", path, &console)
+	out, err := SetupLogOutput("file", path, &console, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +395,7 @@ func TestSetupLogOutput_BothMode(t *testing.T) {
 	var console bytes.Buffer
 	path := filepath.Join(t.TempDir(), "app.log")
 
-	out, err := SetupLogOutput("BOTH", path, &console)
+	out, err := SetupLogOutput("BOTH", path, &console, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +417,7 @@ func TestSetupLogOutput_FileModeFollowsRotation(t *testing.T) {
 	var console bytes.Buffer
 	path := filepath.Join(t.TempDir(), "app.log")
 
-	out, err := SetupLogOutput("file", path, &console)
+	out, err := SetupLogOutput("file", path, &console, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +448,7 @@ func TestSetupLogOutput_Errors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := SetupLogOutput(tc.logTo, tc.path, &console)
+			out, err := SetupLogOutput(tc.logTo, tc.path, &console, io.Discard)
 			if err == nil {
 				t.Fatalf("expected an error, got %+v", out)
 			}
@@ -461,7 +462,7 @@ func TestSetupLogOutput_Errors(t *testing.T) {
 func TestSetupLogOutput_BrokenConsoleDoesNotStopFileLogging(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 
-	out, err := SetupLogOutput("both", path, failingWriter{})
+	out, err := SetupLogOutput("both", path, failingWriter{}, failingWriter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +479,7 @@ func TestSetupLogOutput_WithLogrusAcrossRotation(t *testing.T) {
 	var console bytes.Buffer
 	path := filepath.Join(t.TempDir(), "app.log")
 
-	out, err := SetupLogOutput("file", path, &console)
+	out, err := SetupLogOutput("file", path, &console, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,5 +506,151 @@ func TestSetupLogOutput_WithLogrusAcrossRotation(t *testing.T) {
 	}
 	if console.Len() != 0 {
 		t.Errorf("nothing may reach the console in file mode, got %q", console.String())
+	}
+}
+
+// ── split by level ───────────────────────────────────────────────────────────
+
+// logAllLevels writes one line per level through l and returns nothing: the test looks at where each line ended up.
+func logAllLevels(l *logrus.Logger) {
+	l.SetLevel(logrus.TraceLevel)
+	l.Trace("m-trace")
+	l.Debug("m-debug")
+	l.Info("m-info")
+	l.Warn("m-warn")
+	l.Error("m-error")
+}
+
+func assertLines(t *testing.T, name, got string, want, notWant []string) {
+	t.Helper()
+	for _, m := range want {
+		if !strings.Contains(got, m) {
+			t.Errorf("%s should contain %q, got:\n%s", name, m, got)
+		}
+	}
+	for _, m := range notWant {
+		if strings.Contains(got, m) {
+			t.Errorf("%s must not contain %q, got:\n%s", name, m, got)
+		}
+	}
+}
+
+func TestSetupLogOutput_ConsoleSplitsByLevel(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	out, err := SetupLogOutput("console", "", &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for phase, use := range map[string]func(*logrus.Logger){"startup": out.UseStartup, "runtime": out.UseRuntime} {
+		stdout.Reset()
+		stderr.Reset()
+		l := logrus.New()
+		use(l)
+		logAllLevels(l)
+
+		assertLines(t, phase+" stdout", stdout.String(), []string{"m-trace", "m-debug", "m-info"}, []string{"m-warn", "m-error"})
+		assertLines(t, phase+" stderr", stderr.String(), []string{"m-warn", "m-error"}, []string{"m-trace", "m-debug", "m-info"})
+	}
+}
+
+func TestSetupLogOutput_FatalAndPanicGoToStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	out, err := SetupLogOutput("console", "", &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := logrus.New()
+	out.UseRuntime(l)
+	l.ExitFunc = func(int) {}
+
+	l.Fatal("m-fatal")
+	func() {
+		defer func() { _ = recover() }()
+		l.Panic("m-panic")
+	}()
+
+	assertLines(t, "stderr", stderr.String(), []string{"m-fatal", "m-panic"}, nil)
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
+	}
+}
+
+func TestSetupLogOutput_FileModeSplitsConsoleAndKeepsEverythingInFile(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	path := filepath.Join(t.TempDir(), "app.log")
+	out, err := SetupLogOutput("file", path, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { out.File.Close() })
+
+	l := logrus.New()
+
+	// Startup: console (split by level) and the file.
+	out.UseStartup(l)
+	l.Info("s-info")
+	l.Warn("s-warn")
+	assertLines(t, "stdout", stdout.String(), []string{"s-info"}, []string{"s-warn"})
+	assertLines(t, "stderr", stderr.String(), []string{"s-warn"}, []string{"s-info"})
+
+	// Runtime: the file only.
+	stdout.Reset()
+	stderr.Reset()
+	out.UseRuntime(l)
+	l.Info("r-info")
+	l.Warn("r-warn")
+	l.Error("r-error")
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Errorf("runtime output reached the console: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	assertLines(t, "file", readTestFile(t, path), []string{"s-info", "s-warn", "r-info", "r-warn", "r-error"}, nil)
+}
+
+func TestSetupLogOutput_BothModeWritesEachLineOnceToItsStreamAndToFile(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	path := filepath.Join(t.TempDir(), "app.log")
+	out, err := SetupLogOutput("both", path, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { out.File.Close() })
+
+	l := logrus.New()
+	out.UseRuntime(l)
+	l.Info("r-info")
+	l.Warn("r-warn")
+
+	assertLines(t, "stdout", stdout.String(), []string{"r-info"}, []string{"r-warn"})
+	assertLines(t, "stderr", stderr.String(), []string{"r-warn"}, []string{"r-info"})
+
+	file := readTestFile(t, path)
+	for _, m := range []string{"r-info", "r-warn"} {
+		if n := strings.Count(file, m); n != 1 {
+			t.Errorf("file has %q %d times, want exactly once", m, n)
+		}
+	}
+}
+
+// Switching from the startup to the runtime routing must not leave the old hooks behind, otherwise a line would be written twice.
+func TestRouteByLevel_ReplacesEarlierRouting(t *testing.T) {
+	var startOut, startErr, runOut, runErr bytes.Buffer
+	out := &LogOutputs{Startup: &startOut, StartupErr: &startErr, Runtime: &runOut, RuntimeErr: &runErr}
+
+	l := logrus.New()
+	out.UseStartup(l)
+	out.UseRuntime(l)
+	l.Info("later-info")
+	l.Warn("later-warn")
+
+	if startOut.Len() != 0 || startErr.Len() != 0 {
+		t.Errorf("startup writers still used: %q %q", startOut.String(), startErr.String())
+	}
+	if n := strings.Count(runOut.String(), "later-info"); n != 1 {
+		t.Errorf("info line written %d times, want 1", n)
+	}
+	if n := strings.Count(runErr.String(), "later-warn"); n != 1 {
+		t.Errorf("warn line written %d times, want 1", n)
 	}
 }

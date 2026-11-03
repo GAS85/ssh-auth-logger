@@ -11,7 +11,11 @@
 <body>
   <header>
     <h1>SSH Auth Logger</h1>
-    <div id="status" role="status">Connecting…</div>
+    <div class="controls">
+      <label>Rows <select id="rows"></select></label>
+      <label>Refresh <select id="refresh"></select></label>
+      <span id="status" role="status">Connecting…</span>
+    </div>
   </header>
   <div id="warnings"></div>
 

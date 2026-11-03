@@ -46,6 +46,7 @@ before(async () => {
   log += line({ msg: "SSH connection", src: "::ffff:192.0.43.8", destinationServicename: "sshd", time: iso(7) });
   log += line({ msg: "SSH connection", src: "192.168.1.5", destinationServicename: "sshd", time: iso(8) });
   log += line({ msg: "SSH connection", src: "9.9.9.9", destinationServicename: "sshd", time: iso(9), countryCode: "CH" }); // GeoJS fails -> log fallback
+  log += line({ msg: "Abuse: report threshold reached for 91.198.174.192. Report IP.", ip: "91.198.174.192", protocol: "Telnet", attempts: 3, backends: "AbuseIPDB,DShield", destinationServicename: "sshd", time: iso(0.5) });
   log += line({ msg: "Request with password", src: "8.8.8.8", duser: "root", password: "<img src=x onerror=alert(1)>", destinationServicename: "sshd", time: iso(20) });
   log += line({ msg: "Request with key", src: "8.8.8.8", duser: "admin", fingerprint: "SHA256:abc", keytype: "ssh-ed25519", destinationServicename: "sshd", time: iso(20) });
   fs.writeFileSync(logFile, log);
@@ -180,4 +181,27 @@ test("timeline buckets are aligned to whole minutes and do not move between refr
 test("buckets older than the part of the log that was read are marked incomplete", async () => {
   const { body } = await get("/api/dashboard");
   assert.ok(body.timeline.every((b) => typeof b.complete === "boolean"));
+});
+
+test("abuse report events are listed, located and carry their backends", async () => {
+  const { classify } = require("./server.js");
+  assert.deepEqual(classify({ msg: "Abuse: report threshold reached for 1.2.3.4. Report IP.", protocol: "Telnet", destinationServicename: "sshd" }), { protocol: "telnet", type: "report" });
+
+  const { body } = await get("/api/dashboard");
+  const rep = body.connections.find((c) => c.type === "report");
+  assert.ok(rep, "report event is in the list");
+  assert.equal(rep.src, "91.198.174.192"); // taken from the "ip" field
+  assert.equal(rep.protocol, "telnet");
+  assert.equal(rep.backends, "AbuseIPDB,DShield");
+  assert.equal(rep.countryCode, "NL");
+  assert.equal(rep.msg, "Abuse: report threshold reached for 91.198.174.192. Report IP.");
+  // Reports are not connections: the country statistics and the timeline must not count them.
+  assert.equal(body.countries.NL, 1);
+  assert.equal(body.connections.filter((c) => c.type !== "report").every((c) => c.backends === null), true);
+});
+
+test("up to 50 events and credentials are returned for the page to slice", async () => {
+  const { body } = await get("/api/dashboard");
+  assert.ok(body.connections.length > 10 && body.connections.length <= 50, `connections: ${body.connections.length}`);
+  assert.ok(body.attempts.length <= 50);
 });

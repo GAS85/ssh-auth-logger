@@ -28,6 +28,7 @@ const GEO_MAX_LOOKUPS = Number(process.env.GEO_MAX_LOOKUPS || 30); // new lookup
 const GEO_CONCURRENCY = 5;
 
 const WINDOW_MINUTES = 60;
+const MAX_ROWS = 50; // most rows of events / credentials the page can ask to show
 const RESPONSE_TTL = 2000; // several browser tabs share one computation
 
 const PUBLIC_DIR = path.resolve(__dirname, "public");
@@ -248,8 +249,12 @@ function classify(event) {
   const msg = String(event.msg || "").toLowerCase();
   const service = String(event.destinationServicename || "").toLowerCase();
 
-  const protocol =
-    service.includes("telnet") || event.protocol === "telnet"
+  // "Abuse: report threshold reached for <ip>. Report IP." The honeypot logs these with the fields ip, protocol ("SSH" or "Telnet"), attempts and backends, and without src.
+  const isReport = msg.includes("report threshold reached");
+
+  const protocol = isReport
+    ? String(event.protocol || "").toLowerCase() || "unknown"
+    : service.includes("telnet") || event.protocol === "telnet"
       ? "telnet"
       : service.includes("ssh")
         ? "ssh"
@@ -257,7 +262,8 @@ function classify(event) {
 
   // "Connection dropped (simulated network issue)" contains "connection", so it has to be checked first.
   let type = "other";
-  if (msg.includes("dropped")) type = "dropped";
+  if (isReport) type = "report";
+  else if (msg.includes("dropped")) type = "dropped";
   else if (msg.includes("connection")) type = "connection";
   else if (msg.includes("password") || msg.includes("login attempt"))
     type = "password";
@@ -286,7 +292,11 @@ async function buildDashboard() {
   const raw = logText.status === "fulfilled" ? logText.value.text : "";
   const truncated = logText.status === "fulfilled" && logText.value.truncated;
 
-  const events = parseLog(raw).map((e) => ({ ...e, ...classify(e) }));
+  const events = parseLog(raw).map((e) => {
+    const c = { ...e, ...classify(e) };
+    if (c.type === "report" && !c.src && c.ip) c.src = c.ip; // so reports are listed, linked and located like other events
+    return c;
+  });
 
   // The window is aligned to whole minutes. Buckets then keep their boundaries from one request to the next, so a bar only changes when events arrive; with a window relative to "now" every refresh would shift events between neighbouring buckets.
   const now = Date.now();
@@ -294,12 +304,13 @@ async function buildDashboard() {
   const cutoff = end - WINDOW_MINUTES * 60000;
 
   // Latest events that belong to a source address (startup and abuse messages have none).
-  const recent = events.filter((e) => e.src && e.type !== "other").slice(0, 10);
+  // The page shows 10, 20 or 50 rows as the viewer chooses, so up to MAX_ROWS are sent.
+  const recent = events.filter((e) => e.src && e.type !== "other").slice(0, MAX_ROWS);
   const credentials = events
     .filter((e) => e.type === "password" || e.type === "key")
-    .slice(0, 10);
+    .slice(0, MAX_ROWS);
 
-  // Countries are counted over all connections of the window, not only the 10 shown.
+  // Countries are counted over all connections of the window, not only the rows shown.
   const windowConnections = events.filter((e) => {
     const t = timeOf(e);
     return e.type === "connection" && e.src && t >= cutoff && t < end;
@@ -330,6 +341,7 @@ async function buildDashboard() {
     ...countryOf(e),
     abuseConfidenceScore: e.abuseConfidenceScore ?? null,
     totalReports: e.totalReports ?? null,
+    backends: e.type === "report" && e.backends ? String(e.backends) : null,
     type: e.type,
   }));
 
@@ -355,11 +367,11 @@ async function buildDashboard() {
     const startMs = cutoff + i * 60000;
     return {
       time: new Date(startMs).toISOString(),
-    ssh: 0,
-    telnet: 0,
-    passwords: 0,
-    keys: 0,
-    dropped: 0,
+      ssh: 0,
+      telnet: 0,
+      passwords: 0,
+      keys: 0,
+      dropped: 0,
       current: i === WINDOW_MINUTES - 1,
       complete: !(truncated && startMs < oldest),
     };

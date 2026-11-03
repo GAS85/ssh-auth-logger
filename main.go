@@ -30,6 +30,9 @@ const (
 	appBuild   = "__none__"
 	appLicense = "MIT"
 	appSource  = "https://github.com/GAS85/ssh-auth-logger"
+
+	// shutdownFlushTimeout bounds how long SIGTERM/SIGINT waits for batching abuse backends to send their queue. It stays below the 10s that Docker and systemd give a container or service before killing it.
+	shutdownFlushTimeout = 8 * time.Second
 )
 
 var (
@@ -45,6 +48,9 @@ var (
 	profileScope     string // "host" or "remote_ip"
 	sendBanner       bool
 	logClearPassword bool
+
+	// logPrivateIPsAsUsual (LOG_PRIVATE_IPS_AS_USUAL) switches off the escalated log levels for private source IPs.
+	logPrivateIPsAsUsual bool
 
 	logger                  = common.NewLogger(appName)
 	allowedLogFields        map[string]bool
@@ -175,6 +181,27 @@ func withReputation(fields logrus.Fields) logrus.Fields {
 	return fields
 }
 
+// connLogLevel is the level for connection events from src. Connections from private, loopback or link-local addresses should not reach an internet-facing honeypot, so they are logged as warnings, unless LOG_PRIVATE_IPS_AS_USUAL is set.
+func connLogLevel(src string) logrus.Level {
+	if !logPrivateIPsAsUsual && common.IsPrivateIP(src) {
+		return logrus.WarnLevel
+	}
+	return logrus.InfoLevel
+}
+
+// attemptLogLevel is the same for login attempts: errors for private source IPs, info otherwise.
+func attemptLogLevel(src string) logrus.Level {
+	if !logPrivateIPsAsUsual && common.IsPrivateIP(src) {
+		return logrus.ErrorLevel
+	}
+	return logrus.InfoLevel
+}
+
+// reportableIP reports whether failures from ip may be counted towards abuse reports. Private, loopback and link-local sources are never sent to reporting services, unless LOG_PRIVATE_IPS_AS_USUAL is set.
+func reportableIP(ip string) bool {
+	return logPrivateIPsAsUsual || !common.IsPrivateIP(ip)
+}
+
 // Telnet handler
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
@@ -183,9 +210,11 @@ func handleTelnetConnection(conn net.Conn) {
 	defer stats.OpenTelnet.Add(-1)
 
 	stats.TelnetConnections.Add(1)
-	logger.WithFields(withReputation(connLogParameters(conn))).
+	connFields := connLogParameters(conn)
+	src, _ := connFields["src"].(string)
+	logger.WithFields(withReputation(connFields)).
 		WithField("destinationServicename", "telnetd").
-		Info("Telnet connection")
+		Log(connLogLevel(src), "Telnet connection")
 
 	limitedConn := newRateLimitedConn(conn, telnetRate)
 
@@ -231,11 +260,11 @@ func handleTelnetConnection(conn net.Conn) {
 	stats.TelnetPasswords.Add(1)
 	logger.WithFields(fields).
 		WithField("destinationServicename", "telnetd").
-		Info("Telnet login attempt")
+		Log(attemptLogLevel(src), "Telnet login attempt")
 
 	// AbuseIPDB reporting
 	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
-	if err == nil {
+	if err == nil && reportableIP(ip) {
 		abuseReporter.RecordFailure(
 			ip,
 			"Telnet",
@@ -688,16 +717,17 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 				loggedPassword = string(password)
 			}
 
+			ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+
 			stats.SSHPasswords.Add(1)
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
 					"password":        loggedPassword,
 					"server_key_type": actualHostKeyType,
-				}).Info("Request with password")
+				}).Log(attemptLogLevel(ip), "Request with password")
 
 			// AbuseIPDB reporting
-			ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
-			if err == nil {
+			if err == nil && reportableIP(ip) {
 				abuseReporter.RecordFailure(
 					ip,
 					"SSH",
@@ -716,18 +746,19 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 			jitter := time.Duration(rand.Intn(400)) * time.Millisecond
 			time.Sleep(base + jitter)
 
+			ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+
 			stats.SSHKeys.Add(1)
 			logger.WithFields(logParameters(conn)).
 				WithFields(logrus.Fields{
 					"keytype":         key.Type(),
 					"fingerprint":     ssh.FingerprintSHA256(key),
 					"server_key_type": actualHostKeyType,
-				}).Info("Request with key")
+				}).Log(attemptLogLevel(ip), "Request with key")
 
 			// AbuseIPDB reporting.
 			// Password attempts and public-key attempts both count toward the same IP threshold
-			ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
-			if err == nil {
+			if err == nil && reportableIP(ip) {
 				abuseReporter.RecordFailure(
 					ip,
 					"SSH",
@@ -801,7 +832,9 @@ func serveSSHConn(conn net.Conn) {
 	open := &stats.OpenSSH
 	open.Add(1)
 
-	logger.WithFields(withReputation(connLogParameters(conn))).Info("SSH connection")
+	connFields := connLogParameters(conn)
+	src, _ := connFields["src"].(string)
+	logger.WithFields(withReputation(connFields)).Log(connLogLevel(src), "SSH connection")
 
 	limitedConn := newRateLimitedConn(conn, rate)
 	config := makeSSHConfig(conn)
@@ -815,8 +848,10 @@ func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	// Random early disconnect (~10%)
 	if rand.Intn(10) == 0 {
 		stats.DroppedConnections.Add(1)
-		logger.WithFields(connLogParameters(conn)).
-			Info("Connection dropped (simulated network issue)")
+		dropFields := connLogParameters(conn)
+		src, _ := dropFields["src"].(string)
+		logger.WithFields(dropFields).
+			Log(connLogLevel(src), "Connection dropped (simulated network issue)")
 		conn.Close()
 		return
 	}
@@ -850,12 +885,13 @@ func init() {
 
 	// Log destination: LOG_TO=console (default), file or both. Until the startup message is out, everything is also written to the console (see logOutputs), so the configuration is always visible there; afterwards only LOG_TO decides.
 	logFilePath := getEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
-	logOut, err := common.SetupLogOutput(getEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stderr)
+	// On the console, info and debug lines go to stdout, warnings and above to stderr; a log file gets both.
+	logOut, err := common.SetupLogOutput(getEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stdout, os.Stderr)
 	if err != nil {
 		logrus.Fatal(err)
 	}
 	logDest = logOut
-	logrus.SetOutput(logOut.Startup)
+	logOut.UseStartup(logrus.StandardLogger())
 
 	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
 
@@ -892,6 +928,9 @@ func init() {
 	logClearPassword = logClearPasswordStr == "1" || logClearPasswordStr == "true" || logClearPasswordStr == "yes"
 	telnetLogClearPasswordStr := getEnvWithDefault("TELNET_LOG_CLEAR_PASSWORD", "true")
 	telnetLogClearPassword = telnetLogClearPasswordStr == "1" || telnetLogClearPasswordStr == "true" || telnetLogClearPasswordStr == "yes"
+	// Connections from private IPs are logged as warnings and their login attempts as errors, unless this is set.
+	logPrivateIPsAsUsualStr := getEnvWithDefault("LOG_PRIVATE_IPS_AS_USUAL", "false")
+	logPrivateIPsAsUsual = logPrivateIPsAsUsualStr == "1" || logPrivateIPsAsUsualStr == "true" || logPrivateIPsAsUsualStr == "yes"
 	// Comma-separated list of allowed fields, "" means all, " " means none
 	logsEnv := getEnvWithDefault("LOG_FILTER", "")
 
@@ -960,6 +999,8 @@ func init() {
 			"LOG_TO":        logOut.Mode,
 			"LOG_FILE_PATH": logFilePath,
 			"LOG_FILTER":    logsEnv,
+
+			"LOG_PRIVATE_IPS_AS_USUAL": logPrivateIPsAsUsual,
 		},
 	}
 	// Only show abuse reporting configuration when at least one backend is enabled.
@@ -969,7 +1010,7 @@ func init() {
 	logrus.WithFields(startupFields).Info("Starting SSH Auth Logger")
 
 	// Startup is done: from here on only the destination chosen with LOG_TO is used.
-	logrus.SetOutput(logOut.Runtime)
+	logOut.UseRuntime(logrus.StandardLogger())
 
 	// Configure allowed log fields from environment variable
 	if logsEnv != "" {
@@ -1039,5 +1080,9 @@ func main() {
 	}()
 
 	// Block until SIGTERM/SIGINT, then log the run statistics and exit.
-	common.HandleShutdown(common.NotifyShutdown(), logDest.Startup, appName, stats, abuseReporter, os.Exit)
+	// Before exiting, backends that batch their reports (OTX) send what they have collected, otherwise it would be lost.
+	common.HandleShutdown(common.NotifyShutdown(), logDest.Startup, appName, stats, abuseReporter, func(code int) {
+		abuseReporter.Flush(shutdownFlushTimeout)
+		os.Exit(code)
+	})
 }
