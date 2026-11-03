@@ -41,3 +41,5 @@ td.mono { font-family: ui-monospace, Consolas, monospace; }
 .rowhead { color:var(--muted); font-size:13px; margin:12px 0 -4px; }
 a { color:#7dd3fc; }
 a:hover { color:#bae6fd; }
+.controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; font-size:14px; color:var(--muted); }
+.controls select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; font:inherit; }
