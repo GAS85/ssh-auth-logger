@@ -34,19 +34,22 @@ jobs:
         id: repo
         run: echo "REPO=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
-      - name: Build an image from Dockerfile
-        run: |
-          docker build -t docker.io/${{ steps.repo.outputs.REPO }}:${{ github.sha }} .
-
-      - name: Run Trivy vulnerability scanner
+      - name: Run Trivy vulnerability scanner - report to the Github
         # https://github.com/aquasecurity/trivy-action/releases/tag/v0.36.0
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
-          image-ref: "docker.io/${{ steps.repo.outputs.REPO }}:${{ github.sha }}"
+          image-ref: "ghcr.io/${{ steps.repo.outputs.REPO }}:latest"
           format: "template"
           template: "@/contrib/sarif.tpl"
           output: "trivy-results.sarif"
           severity: "CRITICAL,HIGH"
+
+      - name: Run Trivy vulnerability scanner - direct output
+        # https://github.com/aquasecurity/trivy-action/releases/tag/v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: "ghcr.io/${{ steps.repo.outputs.REPO }}:latest"
+          severity: "MEDIUM,LOW,UNKNOWN"
 
       - name: Upload Trivy scan results to GitHub Security tab
         # https://github.com/github/codeql-action/releases/tag/v4.35.5

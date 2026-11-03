@@ -106,6 +106,13 @@ jobs:
           output: "trivy-results.sarif"
           severity: "CRITICAL,HIGH"
 
+      - name: Run Trivy vulnerability scanner - direct output
+        # https://github.com/aquasecurity/trivy-action/releases/tag/v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: "docker.io/${{ steps.repo.outputs.REPO }}:dev"
+          severity: "MEDIUM,LOW,UNKNOWN"
+
       - name: Upload Trivy scan results to GitHub Security tab
         # https://github.com/github/codeql-action/releases/tag/v4.35.5
         uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba
