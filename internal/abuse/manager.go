@@ -336,6 +336,9 @@ func (m *Manager) Flush(timeout time.Duration) {
 
 	deadline := time.Now().Add(timeout)
 
+	// Read the package-level logger once, here. After a timeout the goroutines below can outlive this call, and must not touch the variable, which Setup (and tests) may replace.
+	log := logger
+
 	// Backend.Report calls that are still running may add to a queue.
 	for m.inflight.Load() > 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -350,7 +353,7 @@ func (m *Manager) Flush(timeout time.Duration) {
 		wg.Add(1)
 		go func(name string, f Flusher) {
 			defer wg.Done()
-			logger.WithField("backend", name).Debug("Abuse: flushing collected reports")
+			log.WithField("backend", name).Debug("Abuse: flushing collected reports")
 			f.Flush()
 		}(b.Name(), f)
 	}
@@ -364,7 +367,7 @@ func (m *Manager) Flush(timeout time.Duration) {
 	select {
 	case <-done:
 	case <-time.After(time.Until(deadline)):
-		logger.WithField("timeout", timeout.String()).Warn("Abuse: flush on shutdown timed out, unsent reports are lost")
+		log.WithField("timeout", timeout.String()).Warn("Abuse: flush on shutdown timed out, unsent reports are lost")
 	}
 }
 
