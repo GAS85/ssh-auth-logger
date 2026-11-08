@@ -897,12 +897,12 @@ func init() {
 
 	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
 	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", "Take me to your leader")
-	rateStr := getEnvWithDefault("SSHD_RATE", "500") // default rate is 500 bytes per second very slow...
+	rateStr := getEnvWithDefault("SSHD_RATE", strconv.Itoa(rand.Intn(251)+450)) // default rate is rand between 450-700 bytes per second very slow...
 	rate, err = strconv.Atoi(rateStr)
 	if err != nil {
 		logrus.Fatal("Invalid SSHD_RATE environment variable")
 	}
-	telnetRateStr := getEnvWithDefault("TELNET_RATE", "100") // Could be slower than SSH
+	telnetRateStr := getEnvWithDefault("TELNET_RATE", strconv.Itoa(rand.Intn(221)+80)) // Could be slower than SSH. Default is 80-300 bytes per second.
 	telnetRate, err = strconv.Atoi(telnetRateStr)
 	if err != nil || telnetRate <= 0 {
 		logrus.Fatal("Invalid TELNET_RATE environment variable")
