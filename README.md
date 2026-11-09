@@ -55,9 +55,7 @@ Optionally ssh-auth-logger will report IPs to the:
 
 Example of AbuseIPDB report sent:
 
-```plain
-SSH authentication brute-force attempt against GAS85/ssh-auth-logger honeypot; usernames=["sysadmin" "winter" "hardy" "esuser" "root" "rr" "jumpuser"]; passwords sha1 prefix=["d033e22a" "7c4a8d09" "44d4965a" "07c536c2" "c539153b" "843cbacc" "1530df65" "d8b93126" "0a27e12d" "c8eb02c9"]
-```
+`SSH authentication brute-force attempt against GAS85/ssh-auth-logger honeypot; usernames=["sysadmin" "winter" "hardy" "esuser" "root" "rr" "jumpuser"]; passwords sha1 prefix=["d033e22a" "7c4a8d09" "44d4965a" "07c536c2" "c539153b" "843cbacc" "1530df65" "d8b93126" "0a27e12d" "c8eb02c9"]`
 
 ### Example log entry
 
@@ -86,27 +84,19 @@ This is normally logged on one line
 
 This is normally reported IP comment:
 
-```plain
-SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot
-```
+`SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot`
 
 If you enable User names reporting, it will be add:
 
-```plain
-SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]
-```
+`SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]`
 
 If you enable Passwords hashes reporting, it will be add:
 
-```plain
-SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords sha1 prefix=["7110eda4" "b3796004" "39ef9aae" "7c4a8d09" "90d3cf82" "4b9bfe79" "4e7afebc" "34b6ede1" "01b307ac"]
-```
+`SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords sha1 prefix=["7110eda4" "b3796004" "39ef9aae" "7c4a8d09" "90d3cf82" "4b9bfe79" "4e7afebc" "34b6ede1" "01b307ac"]`
 
 You can enable plain passwords reporting via `ABUSEIPDB_REPORT_CLEAR_PASSWORD`, but this is **not recommended**, please report hashes instead.
 
-```plain
-SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords=["123456" "123" "1234" "password" "12345678" "merry" "1234" "root] 
-```
+`SSH authentication brute-force attempt GAS85/ssh-auth-logger honeypot; usernames=["flash" "git" "root" "wordpress" "dci" "andong" "mars" "dylan"]; passwords=["123456" "123" "1234" "password" "12345678" "merry" "1234" "root]`
 
 ## How to use it
 
@@ -420,7 +410,7 @@ To test this project you can run:
 go test ./... -v
 ```
 
-## fail2ban configuration
+## fail2ban configuration ![Fail2ban icon](https://avatars.githubusercontent.com/u/1087378?s=30&v=4)
 
 ### Block logging attempts
 
@@ -464,6 +454,7 @@ action = iptables-allports
 # Docker mount log to the localsystem
 logpath = /var/docker/ssh-auth-logger/log/ssh-auth-logger.log
 # maxretry should be equal or more than in a SSHD_MAX_AUTH_TRIES
+# Personally I will add more room and increase it to 3x-5x of max retries
 maxretry = 12
 # For very slow attacker that tries 3 passwords per day
 findtime = 1d
@@ -495,9 +486,11 @@ ignoreregex =
 
 Set `maxretry` for this filter around 1,5 - 2 bigger than for a [Block logging attempts `maxretry`](#block-logging-attempts).
 
-## Cacti integration
+## Cacti integration ![Cacti icon](https://avatars.githubusercontent.com/u/5142645?s=30&v=4)
 
 For cacti integration you can use 2 approaches.
+
+![Cacti Graph](https://github.com/user-attachments/assets/89fad4c6-5c8b-4653-a1fe-a4d1e6b092fc)
 
 ### Use stats endpoint
 
