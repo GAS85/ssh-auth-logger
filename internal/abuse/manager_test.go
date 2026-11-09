@@ -260,6 +260,55 @@ func TestRecordFailure_EmptyUserAndPasswordDoNotCountTowardsThreshold(t *testing
 	f.next(t)
 }
 
+// An HTTP request line sent to the SSH/Telnet port ("GET / HTTP/1.1", password "Host: <our IP>:<port>") is a port scan, not a login attempt. It must never count towards the threshold, whatever the password is.
+func TestRecordFailure_HTTPRequestLineDoesNotCountTowardsThreshold(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(2, f)
+	ip := "192.0.2.26"
+
+	for i := 0; i < 10; i++ {
+		pw := fmt.Sprintf("Host: 198.51.100.7:%d", 2222+i)
+		if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", pw) {
+			t.Fatalf("HTTP scan attempt %d must not trigger a report", i)
+		}
+		if m.RecordFailure(ip, "Telnet", "GET / HTTP/1.1", pw) {
+			t.Fatalf("HTTP scan attempt %d (telnet) must not trigger a report", i)
+		}
+	}
+	if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "") {
+		t.Fatal("HTTP scan attempt with empty password must not trigger a report")
+	}
+	f.expectNone(t)
+
+	attempts, _, _, ok := snapshot(m, ip)
+	if !ok || attempts != 0 {
+		t.Errorf("attempts after HTTP scans = %d (tracked=%v), want 0", attempts, ok)
+	}
+
+	// Real attempts from the same IP still count; the scan lines in between do not.
+	if m.RecordFailure(ip, "SSH", "root", "pw1") {
+		t.Fatal("first real attempt should not report yet")
+	}
+	if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222") {
+		t.Fatal("scan line must not push the IP over the threshold")
+	}
+	if !m.RecordFailure(ip, "SSH", "admin", "pw2") {
+		t.Fatal("second real attempt should report")
+	}
+	f.next(t)
+}
+
+// Only the exact request line is exempt: other usernames that merely look similar still count.
+func TestRecordFailure_OtherHTTPLikeUsernamesStillCount(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(1, f)
+
+	if !m.RecordFailure("192.0.2.27", "SSH", "GET /admin HTTP/1.1", "Host: 198.51.100.7:2222") {
+		t.Fatal("a different request line is treated as an ordinary username")
+	}
+	f.next(t)
+}
+
 func TestRecordFailure_IPsAreTrackedIndependently(t *testing.T) {
 	f := newFake("A")
 	m := newTestManager(2, f)
