@@ -280,6 +280,12 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 		return false
 	}
 
+	// An HTTP port scan attempt is skipped as well. Report shall not be send.
+	if username == "GET / HTTP/1.1" {
+		m.mu.Unlock()
+		return false
+	}
+
 	state.attempts++
 
 	if state.attempts < m.attemptsLimit {
