@@ -646,6 +646,69 @@ var serverProfiles = []serverProfile{
 	},
 
 	{
+		ServerVersion: "SSH-2.0-OpenSSH_8.7",
+		LoginBanner:   "AlmaLinux 9.4 (Seafoam Ocelot)\n\nAuthorized users only. All activity may be monitored and reported.\n",
+		HostKeyType:   "ed25519",
+
+		Kex: []string{
+			"curve25519-sha256",
+			"curve25519-sha256@libssh.org",
+			"ecdh-sha2-nistp256",
+			"ecdh-sha2-nistp384",
+			"ecdh-sha2-nistp521",
+			"diffie-hellman-group16-sha512",
+			"diffie-hellman-group14-sha256",
+		},
+
+		Ciphers: []string{
+			"aes256-gcm@openssh.com",
+			"chacha20-poly1305@openssh.com",
+			"aes256-ctr",
+			"aes128-gcm@openssh.com",
+			"aes128-ctr",
+		},
+
+		Macs: []string{
+			"hmac-sha2-256-etm@openssh.com",
+			"hmac-sha2-512-etm@openssh.com",
+			"hmac-sha2-256",
+			"hmac-sha2-512",
+		},
+	},
+
+	{
+		ServerVersion: "SSH-2.0-OpenSSH_9.6",
+		LoginBanner:   "Welcome to Alpine!\n\nUnauthorized access is prohibited.\n",
+		HostKeyType:   "ed25519",
+
+		Kex: []string{
+			"curve25519-sha256",
+			"curve25519-sha256@libssh.org",
+			"ecdh-sha2-nistp256",
+			"ecdh-sha2-nistp384",
+			"ecdh-sha2-nistp521",
+			"diffie-hellman-group16-sha512",
+			"diffie-hellman-group14-sha256",
+		},
+
+		Ciphers: []string{
+			"chacha20-poly1305@openssh.com",
+			"aes256-gcm@openssh.com",
+			"aes128-gcm@openssh.com",
+			"aes256-ctr",
+			"aes192-ctr",
+			"aes128-ctr",
+		},
+
+		Macs: []string{
+			"hmac-sha2-256-etm@openssh.com",
+			"hmac-sha2-512-etm@openssh.com",
+			"hmac-sha2-256",
+			"hmac-sha2-512",
+		},
+	},
+
+	{
 		ServerVersion: "SSH-2.0-dropbear_2019.78",
 		LoginBanner:   "Welcome to Dropbear SSH Server\n\nUnauthorized access is prohibited.\n",
 		HostKeyType:   "rsa",
@@ -680,7 +743,10 @@ func getServerProfile(host string) serverProfile {
 			}
 		}
 	}
-
+	// Create a deterministic seed from "profile:" plus host, computes an HMAC-SHA256 and interprets its first eight bytes as an int64.
+	// One edge case: negating the minimum int64 value overflows and leaves it negative, which can produce an invalid index.
+	// Index selects the profile at that position in the slice’s declared order.
+	// Selection is deterministic for the same host, key, and list order.
 	seed := HashToInt64([]byte("profile:"+host), []byte(sshd_key_key))
 	if seed < 0 {
 		seed = -seed
