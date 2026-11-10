@@ -105,6 +105,9 @@ func newAbuseIPDBFromEnv() (Backend, logrus.Fields) {
 
 func (b *abuseIPDBBackend) Name() string { return "AbuseIPDB" }
 
+// ReportsPublicKeys implements PublicKeyReporter: public keys are public, so their fingerprints are always included in the comment.
+func (b *abuseIPDBBackend) ReportsPublicKeys() bool { return true }
+
 // Sanitize keeps usernames / passwords only if explicitly enabled. Hashed passwords are cut to the first 8 symbols, as a full SHA1 is easy to revert (kind of k-anonymity model).
 func (b *abuseIPDBBackend) Sanitize(username, password string) (string, string) {
 	if !b.reportClearUsername {
@@ -136,8 +139,11 @@ func (b *abuseIPDBBackend) Report(rep Report) {
 	ip := rep.IP
 	protocol := rep.Protocol
 
-	var usernames, passwords []string
+	var usernames, passwords, publicKeys []string
 	for _, c := range rep.Creds {
+		if c.PublicKey != "" {
+			publicKeys = appendUnique(publicKeys, c.PublicKey)
+		}
 		if c.Username != "" {
 			usernames = appendUnique(usernames, c.Username)
 		}
@@ -168,6 +174,13 @@ func (b *abuseIPDBBackend) Report(rep Report) {
 			"; %s=%q",
 			field,
 			passwords,
+		)
+	}
+
+	if len(publicKeys) > 0 {
+		comment += fmt.Sprintf(
+			"; public key fingerprints=%q",
+			publicKeys,
 		)
 	}
 

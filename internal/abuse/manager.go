@@ -68,6 +68,8 @@ type Credential struct {
 	Time     time.Time
 	Username string
 	Password string
+	// PublicKey is "<type> <SHA256 fingerprint>" of the public key offered in the attempt, empty for password attempts. Only set for backends that implement PublicKeyReporter.
+	PublicKey string
 }
 
 // Report is what a backend receives once an IP has reached the threshold.
@@ -93,6 +95,11 @@ type Backend interface {
 type Flusher interface {
 	// Flush sends everything collected so far. It may block on network I/O.
 	Flush()
+}
+
+// PublicKeyReporter is optionally implemented by a Backend that may publish the fingerprints of the public keys offered by attackers. Public keys are not secret, so unlike passwords they need no sanitizing; a backend that does not implement this (or returns false) never receives them.
+type PublicKeyReporter interface {
+	ReportsPublicKeys() bool
 }
 
 // Reputation is what a reputation service knows about an IP.
@@ -240,6 +247,16 @@ func (m *Manager) Stop() {
 // Attempts with an empty username and an empty password do not count towards the threshold.
 // Returns true if this call caused a report to be scheduled.
 func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
+	return m.record(ip, protocol, username, password, "")
+}
+
+// RecordKeyFailure records a failed public-key authentication attempt. keyType is e.g. "ssh-ed25519", fingerprint the SHA256 fingerprint. It counts towards the same threshold as password attempts; backends implementing PublicKeyReporter get the key in their report.
+func (m *Manager) RecordKeyFailure(ip, protocol, username, keyType, fingerprint string) bool {
+	return m.record(ip, protocol, username, "", strings.TrimSpace(keyType+" "+fingerprint))
+}
+
+// record is the implementation of RecordFailure and RecordKeyFailure; publicKey is empty for password attempts.
+func (m *Manager) record(ip, protocol, username, password, publicKey string) bool {
 	// A nil Manager (Setup never called) is a harmless no-op.
 	if m == nil || len(m.backends) == 0 {
 		return false
@@ -265,7 +282,11 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 	// Each backend decides what it is willing to retain (clear / hashed / nothing).
 	for i, b := range m.backends {
 		u, p := b.Sanitize(username, password)
-		state.creds[i] = addCredential(state.creds[i], Credential{Time: now, Username: u, Password: p})
+		c := Credential{Time: now, Username: u, Password: p}
+		if kr, ok := b.(PublicKeyReporter); ok && kr.ReportsPublicKeys() {
+			c.PublicKey = publicKey
+		}
+		state.creds[i] = addCredential(state.creds[i], c)
 	}
 
 	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
@@ -274,8 +295,8 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 		return false
 	}
 
-	// An attempt with both an empty username and an empty password (judged on the raw input, before any backend sanitizing) is still remembered above, but it does not count towards the report threshold and can never trigger a report on its own.
-	if username == "" && password == "" {
+	// An attempt with an empty username, an empty password and no public key (judged on the raw input, before any backend sanitizing) is still remembered above, but it does not count towards the report threshold and can never trigger a report on its own.
+	if username == "" && password == "" && publicKey == "" {
 		m.mu.Unlock()
 		return false
 	}
@@ -467,7 +488,7 @@ func (m *Manager) cleanupReputation(now time.Time) {
 // addCredential appends c unless the same username/password pair is already present or the per-window cap has been reached.
 func addCredential(list []Credential, c Credential) []Credential {
 	for _, existing := range list {
-		if existing.Username == c.Username && existing.Password == c.Password {
+		if existing.Username == c.Username && existing.Password == c.Password && existing.PublicKey == c.PublicKey {
 			return list
 		}
 	}

@@ -309,6 +309,52 @@ func TestRecordFailure_OtherHTTPLikeUsernamesStillCount(t *testing.T) {
 	f.next(t)
 }
 
+// keyFake is a backend that publishes public keys.
+type keyFake struct{ *fakeBackend }
+
+func (keyFake) ReportsPublicKeys() bool { return true }
+
+func TestRecordKeyFailure_KeyIsPassedOnlyToBackendsThatPublishKeys(t *testing.T) {
+	plain := newFake("plain")
+	withKeys := keyFake{newFake("keys")}
+	m := newTestManager(2, plain, withKeys)
+	ip := "192.0.2.28"
+
+	m.RecordKeyFailure(ip, "SSH", "root", "ssh-ed25519", "SHA256:aaa")
+	if !m.RecordKeyFailure(ip, "SSH", "root", "ssh-rsa", "SHA256:bbb") {
+		t.Fatal("two key attempts should reach the threshold of 2")
+	}
+
+	rp, rk := plain.next(t), withKeys.next(t)
+	if len(rp.Creds) != 1 || rp.Creds[0].PublicKey != "" {
+		t.Errorf("plain backend must not see keys and sees one deduplicated credential: %+v", rp.Creds)
+	}
+	if len(rk.Creds) != 2 || rk.Creds[0].PublicKey != "ssh-ed25519 SHA256:aaa" || rk.Creds[1].PublicKey != "ssh-rsa SHA256:bbb" {
+		t.Errorf("key backend creds = %+v", rk.Creds)
+	}
+}
+
+func TestRecordKeyFailure_CountsEvenWithEmptyUsername(t *testing.T) {
+	f := keyFake{newFake("keys")}
+	m := newTestManager(1, f)
+
+	if !m.RecordKeyFailure("192.0.2.29", "SSH", "", "ssh-ed25519", "SHA256:ccc") {
+		t.Fatal("a key attempt is a real attempt even without a username")
+	}
+	f.next(t)
+}
+
+func TestRecordKeyFailure_SameKeyIsStoredOnce(t *testing.T) {
+	f := keyFake{newFake("keys")}
+	m := newTestManager(3, f)
+	for i := 0; i < 3; i++ {
+		m.RecordKeyFailure("192.0.2.30", "SSH", "root", "ssh-ed25519", "SHA256:ddd")
+	}
+	if r := f.next(t); len(r.Creds) != 1 {
+		t.Errorf("identical key attempts should be de-duplicated, got %+v", r.Creds)
+	}
+}
+
 func TestRecordFailure_IPsAreTrackedIndependently(t *testing.T) {
 	f := newFake("A")
 	m := newTestManager(2, f)
