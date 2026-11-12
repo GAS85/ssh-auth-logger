@@ -36,6 +36,9 @@ var (
 	abuseStateExpiry     time.Duration // ABUSE_STATE_EXPIRY: IP state not seen for this long is dropped
 )
 
+// abuseMinimumAttempts is how many failed attempts an IP must have made, without ever having been reported, to be reported when its state expires (ABUSE_STATE_EXPIRY). This catches scanners that stop before ABUSE_REPORT_ATTEMPTS is reached, but not a one-off mistake such as a mistyped address. If ABUSE_REPORT_ATTEMPTS is lower, that lower value is used.
+const abuseMinimumAttempts = 3
+
 // maxCredsPerWindow bounds how many distinct credential pairs are remembered per IP and backend between two reports, so a noisy attacker cannot grow memory without limit.
 const maxCredsPerWindow = 100
 
@@ -132,6 +135,7 @@ type reputationEntry struct {
 // abuseIPState contains reporting state for one source IP.
 type abuseIPState struct {
 	attempts     int
+	protocol     string // protocol of the latest counted attempt, used if the report is sent on expiry
 	lastReported time.Time
 	lastSeen     time.Time
 	// creds[i] holds the credentials collected for backends[i].
@@ -145,9 +149,11 @@ type Manager struct {
 	backends []Backend
 
 	attemptsLimit int
-	reportEvery   time.Duration
-	cleanupEvery  time.Duration
-	stateExpiry   time.Duration
+	// minAttempts is the number of attempts that is enough for a report when the IP's state expires: abuseMinimumAttempts, but never more than attemptsLimit.
+	minAttempts  int
+	reportEvery  time.Duration
+	cleanupEvery time.Duration
+	stateExpiry  time.Duration
 
 	ips map[string]*abuseIPState
 
@@ -186,6 +192,12 @@ func NewManager(
 		rep:           make(map[string]*reputationEntry),
 		sent:          make([]atomic.Uint64, len(backends)),
 		done:          make(chan struct{}),
+	}
+
+	// Never expect more attempts for an expiry report than a regular report needs.
+	m.minAttempts = abuseMinimumAttempts
+	if attemptsLimit < m.minAttempts {
+		m.minAttempts = attemptsLimit
 	}
 
 	for _, b := range backends {
@@ -308,6 +320,7 @@ func (m *Manager) record(ip, protocol, username, password, publicKey string) boo
 	}
 
 	state.attempts++
+	state.protocol = protocol
 
 	if state.attempts < m.attemptsLimit {
 		m.mu.Unlock()
@@ -340,6 +353,13 @@ func (m *Manager) record(ip, protocol, username, password, publicKey string) boo
 		"backends": strings.Join(names, ","),
 	}).Infof("Abuse: report threshold reached for %s. Report IP.", ip)
 
+	m.dispatch(ip, protocol, snapshots)
+
+	return true
+}
+
+// dispatch hands one report to every backend, each in its own goroutine. creds[i] belongs to backends[i]. The caller must not hold mu.
+func (m *Manager) dispatch(ip, protocol string, creds [][]Credential) {
 	m.reportsTriggered.Add(1)
 	for i, b := range m.backends {
 		m.sent[i].Add(1)
@@ -347,10 +367,8 @@ func (m *Manager) record(ip, protocol, username, password, publicKey string) boo
 		go func(b Backend, rep Report) {
 			defer m.inflight.Add(-1)
 			b.Report(rep)
-		}(b, Report{IP: ip, Protocol: protocol, Creds: snapshots[i]})
+		}(b, Report{IP: ip, Protocol: protocol, Creds: creds[i]})
 	}
-
-	return true
 }
 
 // Flush hands everything that backends have collected but not sent yet to their service (see Flusher). Call it on shutdown, e.g. after SIGTERM, before the process exits.
@@ -516,26 +534,50 @@ func (m *Manager) cleanupLoop() {
 	}
 }
 
-// cleanup removes IPs that have not been seen for the configured state-expiry period.
+// cleanup removes IPs that have not been seen for the configured state-expiry period. An expiring IP that was never reported but made at least minAttempts attempts is reported first, with what was collected, so slow or short scans are not lost.
 func (m *Manager) cleanup() {
 	now := time.Now()
 
+	type expiredReport struct {
+		ip, protocol string
+		attempts     int
+		creds        [][]Credential
+	}
+	var pending []expiredReport
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	removed := 0
 
 	for ip, state := range m.ips {
 		if now.Sub(state.lastSeen) > m.stateExpiry {
+			if state.lastReported.IsZero() && state.attempts >= m.minAttempts {
+				pending = append(pending, expiredReport{ip, state.protocol, state.attempts, state.creds})
+			}
 			delete(m.ips, ip)
 			removed++
 		}
 	}
 
+	remaining := len(m.ips)
+	m.mu.Unlock()
+
+	// The state is gone, so nothing else references the credential slices: they can be handed over without copying.
+	for _, r := range pending {
+		logger.WithFields(logrus.Fields{
+			"ip":       r.ip,
+			"protocol": r.protocol,
+			"attempts": r.attempts,
+			"minimum":  m.minAttempts,
+		}).Infof("Abuse: state of %s expired with enough attempts but no report yet. Report IP.", r.ip)
+
+		m.dispatch(r.ip, r.protocol, r.creds)
+	}
+
 	if removed > 0 {
 		logger.WithFields(logrus.Fields{
 			"removed":   removed,
-			"remaining": len(m.ips),
+			"remaining": remaining,
 		}).Debug("Abuse state cleanup completed")
 	}
 }

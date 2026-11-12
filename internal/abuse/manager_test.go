@@ -634,6 +634,126 @@ func TestNewManager_NoBackendsStartsNoCleanupLoop(t *testing.T) {
 	}
 }
 
+// ── report on expiry ─────────────────────────────────────────────────────────
+
+// ageOut makes the state of ip look like it was last seen long ago.
+func ageOut(m *Manager, ip string) {
+	m.mu.Lock()
+	m.ips[ip].lastSeen = time.Now().Add(-3 * time.Hour)
+	m.mu.Unlock()
+}
+
+func TestCleanup_ReportsExpiredIPWithMinimumAttempts(t *testing.T) {
+	hook := captureLogs(t)
+	f := newFake("A")
+	m := newTestManager(10, f) // threshold far away, state expiry is 1h
+	ip := "192.0.2.100"
+
+	for i := 0; i < abuseMinimumAttempts; i++ {
+		if m.RecordFailure(ip, "Telnet", fmt.Sprintf("u%d", i), "p") {
+			t.Fatal("must not report below the threshold")
+		}
+	}
+	m.cleanup() // not expired yet
+	f.expectNone(t)
+
+	ageOut(m, ip)
+	m.cleanup()
+
+	r := f.next(t)
+	if r.IP != ip || r.Protocol != "Telnet" || len(r.Creds) != abuseMinimumAttempts {
+		t.Errorf("report = %+v", r)
+	}
+	if _, _, _, ok := snapshot(m, ip); ok {
+		t.Error("expired state was not removed")
+	}
+	if st := m.Stats(); st.ReportsTriggered != 1 || st.SentByBackend["A"] != 1 {
+		t.Errorf("stats = %+v", st)
+	}
+	if hook.find("expired with enough attempts") == nil {
+		t.Error("expected a log message for the report on expiry")
+	}
+	f.expectNone(t)
+}
+
+func TestCleanup_DoesNotReportBelowMinimumAttempts(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(10, f)
+	ip := "192.0.2.101"
+
+	for i := 0; i < abuseMinimumAttempts-1; i++ {
+		m.RecordFailure(ip, "SSH", "root", fmt.Sprintf("p%d", i))
+	}
+	ageOut(m, ip)
+	m.cleanup()
+
+	f.expectNone(t)
+	if _, _, _, ok := snapshot(m, ip); ok {
+		t.Error("expired state was not removed")
+	}
+}
+
+func TestCleanup_DoesNotCountIgnoredAttemptsTowardsMinimum(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(10, f)
+	ip := "192.0.2.102"
+
+	m.RecordFailure(ip, "SSH", "root", "pw")
+	for i := 0; i < 5; i++ {
+		m.RecordFailure(ip, "SSH", "", "")
+		m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222")
+	}
+	ageOut(m, ip)
+	m.cleanup()
+
+	f.expectNone(t)
+}
+
+func TestCleanup_DoesNotReportAnIPThatWasReportedBefore(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(2, f)
+	ip := "192.0.2.103"
+
+	m.RecordFailure(ip, "SSH", "a", "p")
+	if !m.RecordFailure(ip, "SSH", "b", "p") {
+		t.Fatal("expected the regular report")
+	}
+	f.next(t)
+
+	// More attempts after the cooldown, still below the threshold.
+	m.mu.Lock()
+	m.ips[ip].attempts = abuseMinimumAttempts
+	m.mu.Unlock()
+
+	ageOut(m, ip)
+	m.cleanup()
+
+	f.expectNone(t)
+}
+
+func TestNewManager_MinimumAttemptsNeverExceedsThreshold(t *testing.T) {
+	cases := []struct{ limit, want int }{
+		{1, 1}, {2, 2}, {abuseMinimumAttempts, abuseMinimumAttempts}, {10, abuseMinimumAttempts},
+	}
+	for _, tc := range cases {
+		if got := newTestManager(tc.limit).minAttempts; got != tc.want {
+			t.Errorf("limit %d: minAttempts = %d, want %d", tc.limit, got, tc.want)
+		}
+	}
+}
+
+func TestCleanup_ThresholdBelowMinimumUsesThreshold(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(2, f)
+	ip := "192.0.2.104"
+
+	// A single attempt is below both the threshold (2) and the effective minimum (2).
+	m.RecordFailure(ip, "SSH", "root", "pw")
+	ageOut(m, ip)
+	m.cleanup()
+	f.expectNone(t)
+}
+
 // ── Setup ────────────────────────────────────────────────────────────────────
 
 func TestSetup_DefaultsWithNothingEnabled(t *testing.T) {
