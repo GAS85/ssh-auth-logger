@@ -670,8 +670,12 @@ func TestCleanup_ReportsExpiredIPWithMinimumAttempts(t *testing.T) {
 	if st := m.Stats(); st.ReportsTriggered != 1 || st.SentByBackend["A"] != 1 {
 		t.Errorf("stats = %+v", st)
 	}
-	if hook.find("state of 192.0.2.100 with enough attempts") == nil {
-		t.Error("expected a log message for the report on expiry")
+	e := hook.find("state of 192.0.2.100 with enough attempts")
+	if e == nil {
+		t.Fatal("expected a log message for the report on expiry")
+	}
+	if e.Data["backends"] != "A" || e.Data["protocol"] != "Telnet" || e.Data["ip"] != ip {
+		t.Errorf("log fields = %v, want backends, protocol and ip like the threshold message", e.Data)
 	}
 	f.expectNone(t)
 }

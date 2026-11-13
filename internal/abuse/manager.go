@@ -395,12 +395,19 @@ func (m *Manager) takeUnreported(now time.Time, include func(*abuseIPState) bool
 
 // sendPending logs and dispatches reports from takeUnreported. why completes the log message. The caller must not hold mu.
 func (m *Manager) sendPending(log *logrus.Entry, why string, list []pendingReport) {
+	names := make([]string, len(m.backends))
+	for i, b := range m.backends {
+		names[i] = b.Name()
+	}
+	backends := strings.Join(names, ",")
+
 	for _, r := range list {
 		log.WithFields(logrus.Fields{
 			"ip":       r.ip,
 			"protocol": r.protocol,
 			"attempts": r.attempts,
 			"minimum":  m.minAttempts,
+			"backends": backends,
 		}).Infof("Abuse: %s %s with enough attempts but no report yet. Report IP.", why, r.ip)
 
 		m.dispatch(r.ip, r.protocol, r.creds)

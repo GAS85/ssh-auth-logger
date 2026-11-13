@@ -249,8 +249,8 @@ function classify(event) {
   const msg = String(event.msg || "").toLowerCase();
   const service = String(event.destinationServicename || "").toLowerCase();
 
-  // "Abuse: report threshold reached for <ip>. Report IP." The honeypot logs these with the fields ip, protocol ("SSH" or "Telnet"), attempts and backends, and without src.
-  const isReport = msg.includes("Report IP");
+  // "Abuse: report threshold reached for <ip>. Report IP." and the variants sent on state expiry or shutdown, all ending in "Report IP.". The honeypot logs these with the fields ip, protocol ("SSH" or "Telnet"), attempts and backends, and without src.
+  const isReport = msg.includes("report ip"); // msg is lowercased above
 
   const protocol = isReport
     ? String(event.protocol || "").toLowerCase() || "unknown"
