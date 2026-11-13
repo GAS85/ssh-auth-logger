@@ -371,6 +371,42 @@ func (m *Manager) dispatch(ip, protocol string, creds [][]Credential) {
 	}
 }
 
+// pendingReport is a report for an IP that did not reach the threshold but made enough attempts.
+type pendingReport struct {
+	ip, protocol string
+	attempts     int
+	creds        [][]Credential
+}
+
+// takeUnreported returns a report for every IP that was never reported, has made at least minAttempts attempts and is accepted by include. These IPs are marked as reported, with an empty window, so the same data is never sent twice. The caller must hold mu, and sends the result with sendPending after releasing it.
+func (m *Manager) takeUnreported(now time.Time, include func(*abuseIPState) bool) []pendingReport {
+	var out []pendingReport
+	for ip, state := range m.ips {
+		if !state.lastReported.IsZero() || state.attempts < m.minAttempts || !include(state) {
+			continue
+		}
+		out = append(out, pendingReport{ip, state.protocol, state.attempts, state.creds})
+		state.creds = make([][]Credential, len(m.backends))
+		state.lastReported = now
+		state.attempts = 0
+	}
+	return out
+}
+
+// sendPending logs and dispatches reports from takeUnreported. why completes the log message. The caller must not hold mu.
+func (m *Manager) sendPending(log *logrus.Entry, why string, list []pendingReport) {
+	for _, r := range list {
+		log.WithFields(logrus.Fields{
+			"ip":       r.ip,
+			"protocol": r.protocol,
+			"attempts": r.attempts,
+			"minimum":  m.minAttempts,
+		}).Infof("Abuse: %s %s with enough attempts but no report yet. Report IP.", why, r.ip)
+
+		m.dispatch(r.ip, r.protocol, r.creds)
+	}
+}
+
 // Flush hands everything that backends have collected but not sent yet to their service (see Flusher). Call it on shutdown, e.g. after SIGTERM, before the process exits.
 //
 // Reports that were just triggered are given time to reach their backend first. Flush returns once all backends are done, or after timeout (so a slow service cannot block the shutdown); whatever is not sent by then is lost.
@@ -383,6 +419,12 @@ func (m *Manager) Flush(timeout time.Duration) {
 
 	// Read the package-level logger once, here. After a timeout the goroutines below can outlive this call, and must not touch the variable, which Setup (and tests) may replace.
 	log := logger
+
+	// IPs that have made enough attempts but have not reached the threshold yet would otherwise be lost with the process: report them now, like cleanup does for expired IPs. This has to happen before the backends are flushed, so the reports are part of the batch.
+	m.mu.Lock()
+	pending := m.takeUnreported(time.Now(), func(*abuseIPState) bool { return true })
+	m.mu.Unlock()
+	m.sendPending(log, "shutting down,", pending)
 
 	// Backend.Report calls that are still running may add to a queue.
 	for m.inflight.Load() > 0 && time.Now().Before(deadline) {
@@ -537,23 +579,15 @@ func (m *Manager) cleanupLoop() {
 // cleanup removes IPs that have not been seen for the configured state-expiry period. An expiring IP that was never reported but made at least minAttempts attempts is reported first, with what was collected, so slow or short scans are not lost.
 func (m *Manager) cleanup() {
 	now := time.Now()
-
-	type expiredReport struct {
-		ip, protocol string
-		attempts     int
-		creds        [][]Credential
-	}
-	var pending []expiredReport
+	expired := func(s *abuseIPState) bool { return now.Sub(s.lastSeen) > m.stateExpiry }
 
 	m.mu.Lock()
 
-	removed := 0
+	pending := m.takeUnreported(now, expired)
 
+	removed := 0
 	for ip, state := range m.ips {
-		if now.Sub(state.lastSeen) > m.stateExpiry {
-			if state.lastReported.IsZero() && state.attempts >= m.minAttempts {
-				pending = append(pending, expiredReport{ip, state.protocol, state.attempts, state.creds})
-			}
+		if expired(state) {
 			delete(m.ips, ip)
 			removed++
 		}
@@ -562,17 +596,8 @@ func (m *Manager) cleanup() {
 	remaining := len(m.ips)
 	m.mu.Unlock()
 
-	// The state is gone, so nothing else references the credential slices: they can be handed over without copying.
-	for _, r := range pending {
-		logger.WithFields(logrus.Fields{
-			"ip":       r.ip,
-			"protocol": r.protocol,
-			"attempts": r.attempts,
-			"minimum":  m.minAttempts,
-		}).Infof("Abuse: state of %s expired with enough attempts but no report yet. Report IP.", r.ip)
-
-		m.dispatch(r.ip, r.protocol, r.creds)
-	}
+	// The state is gone, so nothing else references the credential slices.
+	m.sendPending(logger, "state of", pending)
 
 	if removed > 0 {
 		logger.WithFields(logrus.Fields{

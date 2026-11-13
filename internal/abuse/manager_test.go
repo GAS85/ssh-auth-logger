@@ -670,7 +670,7 @@ func TestCleanup_ReportsExpiredIPWithMinimumAttempts(t *testing.T) {
 	if st := m.Stats(); st.ReportsTriggered != 1 || st.SentByBackend["A"] != 1 {
 		t.Errorf("stats = %+v", st)
 	}
-	if hook.find("expired with enough attempts") == nil {
+	if hook.find("state of 192.0.2.100 with enough attempts") == nil {
 		t.Error("expected a log message for the report on expiry")
 	}
 	f.expectNone(t)
@@ -1087,6 +1087,50 @@ func TestFlush_WaitsForReportsInFlight(t *testing.T) {
 	if flushed, _ := f.stats(); flushed != 1 {
 		t.Errorf("flushed %d reports, want the one that was in flight", flushed)
 	}
+}
+
+// IPs below the threshold but with enough attempts are reported on shutdown, and their report is part of what the backend flushes.
+func TestFlush_ReportsIPsWithMinimumAttempts(t *testing.T) {
+	hook := captureLogs(t)
+	f := &flushFake{fakeBackend: newFake("batching")}
+	m := stoppable(t, newTestManager(10, f))
+
+	for i := 0; i < abuseMinimumAttempts; i++ {
+		m.RecordFailure("192.0.2.110", "Telnet", "root", fmt.Sprintf("p%d", i)) // enough
+	}
+	for i := 0; i < abuseMinimumAttempts-1; i++ {
+		m.RecordFailure("192.0.2.111", "SSH", "root", fmt.Sprintf("p%d", i)) // too few
+	}
+
+	m.Flush(2 * time.Second)
+
+	if flushed, _ := f.stats(); flushed != 1 {
+		t.Errorf("flushed %d reports, want 1 (only the IP with enough attempts)", flushed)
+	}
+	if st := m.Stats(); st.ReportsTriggered != 1 {
+		t.Errorf("ReportsTriggered = %d, want 1", st.ReportsTriggered)
+	}
+	if hook.find("shutting down, 192.0.2.110 with enough attempts") == nil {
+		t.Error("expected a log message for the report on shutdown")
+	}
+
+	// A second flush must not send the same data again.
+	m.Flush(2 * time.Second)
+	if st := m.Stats(); st.ReportsTriggered != 1 {
+		t.Errorf("ReportsTriggered after second Flush = %d, want still 1", st.ReportsTriggered)
+	}
+}
+
+func TestFlush_DoesNotReportIPsThatWereReported(t *testing.T) {
+	f := newFake("A")
+	m := stoppable(t, newTestManager(2, f))
+
+	m.RecordFailure("192.0.2.112", "SSH", "a", "p")
+	m.RecordFailure("192.0.2.112", "SSH", "b", "p") // regular report
+	f.next(t)
+
+	m.Flush(time.Second)
+	f.expectNone(t)
 }
 
 func TestFlush_TimesOutInsteadOfBlockingShutdown(t *testing.T) {
