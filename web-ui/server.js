@@ -250,7 +250,7 @@ function classify(event) {
   const service = String(event.destinationServicename || "").toLowerCase();
 
   // "Abuse: report threshold reached for <ip>. Report IP." The honeypot logs these with the fields ip, protocol ("SSH" or "Telnet"), attempts and backends, and without src.
-  const isReport = msg.includes("report threshold reached");
+  const isReport = msg.includes("Report IP");
 
   const protocol = isReport
     ? String(event.protocol || "").toLowerCase() || "unknown"
