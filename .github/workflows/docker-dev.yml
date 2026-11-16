@@ -194,3 +194,12 @@ jobs:
           crane mutate \
             --label org.opencontainers.image.url="https://hub.docker.com/r/GAS85/ssh-auth-logger" \
             "ghcr.io/${{ steps.meta.outputs.REPO }}:${{ steps.meta.outputs.VERSION }}-webui"
+
+      - name: Delete old untagged packages
+        # https://github.com/actions/delete-package-versions/releases/tag/v5.0.0
+        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55
+        with: 
+          package-name: 'ssh-auth-logger'
+          package-type: 'container'
+          min-versions-to-keep: 1
+          delete-only-untagged-versions: 'true'

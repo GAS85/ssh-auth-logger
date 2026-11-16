@@ -825,11 +825,12 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 			// AbuseIPDB reporting.
 			// Password attempts and public-key attempts both count toward the same IP threshold
 			if err == nil && reportableIP(ip) {
-				abuseReporter.RecordFailure(
+				abuseReporter.RecordKeyFailure(
 					ip,
 					"SSH",
 					conn.User(),
-					"",
+					key.Type(),
+					ssh.FingerprintSHA256(key),
 				)
 			}
 

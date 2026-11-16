@@ -36,6 +36,9 @@ var (
 	abuseStateExpiry     time.Duration // ABUSE_STATE_EXPIRY: IP state not seen for this long is dropped
 )
 
+// abuseMinimumAttempts is how many failed attempts an IP must have made, without ever having been reported, to be reported when its state expires (ABUSE_STATE_EXPIRY). This catches scanners that stop before ABUSE_REPORT_ATTEMPTS is reached, but not a one-off mistake such as a mistyped address. If ABUSE_REPORT_ATTEMPTS is lower, that lower value is used.
+const abuseMinimumAttempts = 3
+
 // maxCredsPerWindow bounds how many distinct credential pairs are remembered per IP and backend between two reports, so a noisy attacker cannot grow memory without limit.
 const maxCredsPerWindow = 100
 
@@ -68,6 +71,8 @@ type Credential struct {
 	Time     time.Time
 	Username string
 	Password string
+	// PublicKey is "<type> <SHA256 fingerprint>" of the public key offered in the attempt, empty for password attempts. Only set for backends that implement PublicKeyReporter.
+	PublicKey string
 }
 
 // Report is what a backend receives once an IP has reached the threshold.
@@ -93,6 +98,11 @@ type Backend interface {
 type Flusher interface {
 	// Flush sends everything collected so far. It may block on network I/O.
 	Flush()
+}
+
+// PublicKeyReporter is optionally implemented by a Backend that may publish the fingerprints of the public keys offered by attackers. Public keys are not secret, so unlike passwords they need no sanitizing; a backend that does not implement this (or returns false) never receives them.
+type PublicKeyReporter interface {
+	ReportsPublicKeys() bool
 }
 
 // Reputation is what a reputation service knows about an IP.
@@ -125,6 +135,7 @@ type reputationEntry struct {
 // abuseIPState contains reporting state for one source IP.
 type abuseIPState struct {
 	attempts     int
+	protocol     string // protocol of the latest counted attempt, used if the report is sent on expiry
 	lastReported time.Time
 	lastSeen     time.Time
 	// creds[i] holds the credentials collected for backends[i].
@@ -138,9 +149,11 @@ type Manager struct {
 	backends []Backend
 
 	attemptsLimit int
-	reportEvery   time.Duration
-	cleanupEvery  time.Duration
-	stateExpiry   time.Duration
+	// minAttempts is the number of attempts that is enough for a report when the IP's state expires: abuseMinimumAttempts, but never more than attemptsLimit.
+	minAttempts  int
+	reportEvery  time.Duration
+	cleanupEvery time.Duration
+	stateExpiry  time.Duration
 
 	ips map[string]*abuseIPState
 
@@ -179,6 +192,12 @@ func NewManager(
 		rep:           make(map[string]*reputationEntry),
 		sent:          make([]atomic.Uint64, len(backends)),
 		done:          make(chan struct{}),
+	}
+
+	// Never expect more attempts for an expiry report than a regular report needs.
+	m.minAttempts = abuseMinimumAttempts
+	if attemptsLimit < m.minAttempts {
+		m.minAttempts = attemptsLimit
 	}
 
 	for _, b := range backends {
@@ -240,6 +259,16 @@ func (m *Manager) Stop() {
 // Attempts with an empty username and an empty password do not count towards the threshold.
 // Returns true if this call caused a report to be scheduled.
 func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
+	return m.record(ip, protocol, username, password, "")
+}
+
+// RecordKeyFailure records a failed public-key authentication attempt. keyType is e.g. "ssh-ed25519", fingerprint the SHA256 fingerprint. It counts towards the same threshold as password attempts; backends implementing PublicKeyReporter get the key in their report.
+func (m *Manager) RecordKeyFailure(ip, protocol, username, keyType, fingerprint string) bool {
+	return m.record(ip, protocol, username, "", strings.TrimSpace(keyType+" "+fingerprint))
+}
+
+// record is the implementation of RecordFailure and RecordKeyFailure; publicKey is empty for password attempts.
+func (m *Manager) record(ip, protocol, username, password, publicKey string) bool {
 	// A nil Manager (Setup never called) is a harmless no-op.
 	if m == nil || len(m.backends) == 0 {
 		return false
@@ -265,7 +294,11 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 	// Each backend decides what it is willing to retain (clear / hashed / nothing).
 	for i, b := range m.backends {
 		u, p := b.Sanitize(username, password)
-		state.creds[i] = addCredential(state.creds[i], Credential{Time: now, Username: u, Password: p})
+		c := Credential{Time: now, Username: u, Password: p}
+		if kr, ok := b.(PublicKeyReporter); ok && kr.ReportsPublicKeys() {
+			c.PublicKey = publicKey
+		}
+		state.creds[i] = addCredential(state.creds[i], c)
 	}
 
 	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
@@ -274,8 +307,8 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 		return false
 	}
 
-	// An attempt with both an empty username and an empty password (judged on the raw input, before any backend sanitizing) is still remembered above, but it does not count towards the report threshold and can never trigger a report on its own.
-	if username == "" && password == "" {
+	// An attempt with an empty username, an empty password and no public key (judged on the raw input, before any backend sanitizing) is still remembered above, but it does not count towards the report threshold and can never trigger a report on its own.
+	if username == "" && password == "" && publicKey == "" {
 		m.mu.Unlock()
 		return false
 	}
@@ -287,6 +320,7 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 	}
 
 	state.attempts++
+	state.protocol = protocol
 
 	if state.attempts < m.attemptsLimit {
 		m.mu.Unlock()
@@ -319,6 +353,13 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 		"backends": strings.Join(names, ","),
 	}).Infof("Abuse: report threshold reached for %s. Report IP.", ip)
 
+	m.dispatch(ip, protocol, snapshots)
+
+	return true
+}
+
+// dispatch hands one report to every backend, each in its own goroutine. creds[i] belongs to backends[i]. The caller must not hold mu.
+func (m *Manager) dispatch(ip, protocol string, creds [][]Credential) {
 	m.reportsTriggered.Add(1)
 	for i, b := range m.backends {
 		m.sent[i].Add(1)
@@ -326,10 +367,51 @@ func (m *Manager) RecordFailure(ip, protocol, username, password string) bool {
 		go func(b Backend, rep Report) {
 			defer m.inflight.Add(-1)
 			b.Report(rep)
-		}(b, Report{IP: ip, Protocol: protocol, Creds: snapshots[i]})
+		}(b, Report{IP: ip, Protocol: protocol, Creds: creds[i]})
 	}
+}
 
-	return true
+// pendingReport is a report for an IP that did not reach the threshold but made enough attempts.
+type pendingReport struct {
+	ip, protocol string
+	attempts     int
+	creds        [][]Credential
+}
+
+// takeUnreported returns a report for every IP that was never reported, has made at least minAttempts attempts and is accepted by include. These IPs are marked as reported, with an empty window, so the same data is never sent twice. The caller must hold mu, and sends the result with sendPending after releasing it.
+func (m *Manager) takeUnreported(now time.Time, include func(*abuseIPState) bool) []pendingReport {
+	var out []pendingReport
+	for ip, state := range m.ips {
+		if !state.lastReported.IsZero() || state.attempts < m.minAttempts || !include(state) {
+			continue
+		}
+		out = append(out, pendingReport{ip, state.protocol, state.attempts, state.creds})
+		state.creds = make([][]Credential, len(m.backends))
+		state.lastReported = now
+		state.attempts = 0
+	}
+	return out
+}
+
+// sendPending logs and dispatches reports from takeUnreported. why completes the log message. The caller must not hold mu.
+func (m *Manager) sendPending(log *logrus.Entry, why string, list []pendingReport) {
+	names := make([]string, len(m.backends))
+	for i, b := range m.backends {
+		names[i] = b.Name()
+	}
+	backends := strings.Join(names, ",")
+
+	for _, r := range list {
+		log.WithFields(logrus.Fields{
+			"ip":       r.ip,
+			"protocol": r.protocol,
+			"attempts": r.attempts,
+			"minimum":  m.minAttempts,
+			"backends": backends,
+		}).Infof("Abuse: %s %s with enough attempts but no report yet. Report IP.", why, r.ip)
+
+		m.dispatch(r.ip, r.protocol, r.creds)
+	}
 }
 
 // Flush hands everything that backends have collected but not sent yet to their service (see Flusher). Call it on shutdown, e.g. after SIGTERM, before the process exits.
@@ -344,6 +426,12 @@ func (m *Manager) Flush(timeout time.Duration) {
 
 	// Read the package-level logger once, here. After a timeout the goroutines below can outlive this call, and must not touch the variable, which Setup (and tests) may replace.
 	log := logger
+
+	// IPs that have made enough attempts but have not reached the threshold yet would otherwise be lost with the process: report them now, like cleanup does for expired IPs. This has to happen before the backends are flushed, so the reports are part of the batch.
+	m.mu.Lock()
+	pending := m.takeUnreported(time.Now(), func(*abuseIPState) bool { return true })
+	m.mu.Unlock()
+	m.sendPending(log, "shutting down,", pending)
 
 	// Backend.Report calls that are still running may add to a queue.
 	for m.inflight.Load() > 0 && time.Now().Before(deadline) {
@@ -467,7 +555,7 @@ func (m *Manager) cleanupReputation(now time.Time) {
 // addCredential appends c unless the same username/password pair is already present or the per-window cap has been reached.
 func addCredential(list []Credential, c Credential) []Credential {
 	for _, existing := range list {
-		if existing.Username == c.Username && existing.Password == c.Password {
+		if existing.Username == c.Username && existing.Password == c.Password && existing.PublicKey == c.PublicKey {
 			return list
 		}
 	}
@@ -495,26 +583,33 @@ func (m *Manager) cleanupLoop() {
 	}
 }
 
-// cleanup removes IPs that have not been seen for the configured state-expiry period.
+// cleanup removes IPs that have not been seen for the configured state-expiry period. An expiring IP that was never reported but made at least minAttempts attempts is reported first, with what was collected, so slow or short scans are not lost.
 func (m *Manager) cleanup() {
 	now := time.Now()
+	expired := func(s *abuseIPState) bool { return now.Sub(s.lastSeen) > m.stateExpiry }
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+
+	pending := m.takeUnreported(now, expired)
 
 	removed := 0
-
 	for ip, state := range m.ips {
-		if now.Sub(state.lastSeen) > m.stateExpiry {
+		if expired(state) {
 			delete(m.ips, ip)
 			removed++
 		}
 	}
 
+	remaining := len(m.ips)
+	m.mu.Unlock()
+
+	// The state is gone, so nothing else references the credential slices.
+	m.sendPending(logger, "state of", pending)
+
 	if removed > 0 {
 		logger.WithFields(logrus.Fields{
 			"removed":   removed,
-			"remaining": len(m.ips),
+			"remaining": remaining,
 		}).Debug("Abuse state cleanup completed")
 	}
 }

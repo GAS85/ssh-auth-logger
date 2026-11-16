@@ -187,6 +187,12 @@ test("abuse report events are listed, located and carry their backends", async (
   const { classify } = require("./server.js");
   assert.deepEqual(classify({ msg: "Abuse: report threshold reached for 1.2.3.4. Report IP.", protocol: "Telnet", destinationServicename: "sshd" }), { protocol: "telnet", type: "report" });
 
+  // The reports sent when a state expires or on shutdown are reports as well.
+  for (const msg of ["Abuse: state of 1.2.3.4 with enough attempts but no report yet. Report IP.", "Abuse: shutting down, 1.2.3.4 with enough attempts but no report yet. Report IP."]) {
+    assert.equal(classify({ msg, protocol: "SSH", destinationServicename: "sshd" }).type, "report", msg);
+  }
+  assert.notEqual(classify({ msg: "AbuseIPDB: IP 1.2.3.4 reported", destinationServicename: "sshd" }).type, "report");
+
   const { body } = await get("/api/dashboard");
   const rep = body.connections.find((c) => c.type === "report");
   assert.ok(rep, "report event is in the list");

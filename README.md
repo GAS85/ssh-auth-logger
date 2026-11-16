@@ -345,6 +345,11 @@ This part is optional, you can skip it and use defaults listed here.
       - OTX_PUBLIC=true                             # OTX_TLP set to amber and red need "false"
       - OTX_TAGS="honeypot,ssh,telnet,brute-force"  # Tags as comma separated list
       - OTX_INDICATOR_ROLE=bruteforce               # Role name. An unknown role could make OTX reject every batch.
+      - OTX_REPORT_CLEAR_USERNAME=false             # Report User names to OTX in a clear text
+      - OTX_REPORT_HASHED_PASSWORD=false            # Report hashed Passwords to OTX
+      - OTX_REPORT_CLEAR_PASSWORD=false             # Report Passwords to OTX in a clear text.
+      # It is strongly recommended to use OTX_REPORT_HASHED_PASSWORD instead.
+      # Works only when report of hashed password is disabled and TLP is set to "red"
 ```
 
 #### Spamhaus Reporting part

@@ -287,6 +287,42 @@ func TestAbuseIPDB_CommentContent(t *testing.T) {
 	}
 }
 
+func TestAbuseIPDB_PublishesPublicKeyFingerprints(t *testing.T) {
+	var _ PublicKeyReporter = (*abuseIPDBBackend)(nil)
+
+	rec := newRecorder(200, `{}`)
+	// All credential flags off: keys are public and are reported regardless.
+	b := newAbuseIPDBForTest(rec)
+	if !b.ReportsPublicKeys() {
+		t.Fatal("AbuseIPDB must accept public keys")
+	}
+	b.Report(Report{IP: "192.0.2.58", Protocol: "SSH", Creds: []Credential{
+		{Username: "root", PublicKey: "ssh-ed25519 SHA256:aaa"},
+		{Username: "admin", PublicKey: "ssh-rsa SHA256:bbb"},
+		{Username: "x", PublicKey: "ssh-ed25519 SHA256:aaa"}, // duplicate key
+		{Username: "y", Password: "pw"},                      // no key
+	}})
+
+	comment := rec.only(t).form.Get("comment")
+	if !strings.Contains(comment, `public key fingerprints=["ssh-ed25519 SHA256:aaa" "ssh-rsa SHA256:bbb"]`) {
+		t.Errorf("comment %q lacks the key fingerprints", comment)
+	}
+	for _, n := range []string{"root", "admin", "pw"} {
+		if strings.Contains(comment, n) {
+			t.Errorf("comment %q must not contain %q", comment, n)
+		}
+	}
+}
+
+func TestAbuseIPDB_NoKeysNoKeyField(t *testing.T) {
+	rec := newRecorder(200, `{}`)
+	b := newAbuseIPDBForTest(rec)
+	b.Report(Report{IP: "192.0.2.59", Protocol: "SSH", Creds: creds("root", "pw")})
+	if c := rec.only(t).form.Get("comment"); strings.Contains(c, "public key") {
+		t.Errorf("comment %q mentions public keys", c)
+	}
+}
+
 func TestAbuseIPDB_CommentIsTruncatedOnRuneBoundary(t *testing.T) {
 	rec := newRecorder(200, `{}`)
 	b := newAbuseIPDBForTest(rec, func(b *abuseIPDBBackend) { b.reportClearUsername = true })

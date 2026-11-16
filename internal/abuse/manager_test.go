@@ -309,6 +309,52 @@ func TestRecordFailure_OtherHTTPLikeUsernamesStillCount(t *testing.T) {
 	f.next(t)
 }
 
+// keyFake is a backend that publishes public keys.
+type keyFake struct{ *fakeBackend }
+
+func (keyFake) ReportsPublicKeys() bool { return true }
+
+func TestRecordKeyFailure_KeyIsPassedOnlyToBackendsThatPublishKeys(t *testing.T) {
+	plain := newFake("plain")
+	withKeys := keyFake{newFake("keys")}
+	m := newTestManager(2, plain, withKeys)
+	ip := "192.0.2.28"
+
+	m.RecordKeyFailure(ip, "SSH", "root", "ssh-ed25519", "SHA256:aaa")
+	if !m.RecordKeyFailure(ip, "SSH", "root", "ssh-rsa", "SHA256:bbb") {
+		t.Fatal("two key attempts should reach the threshold of 2")
+	}
+
+	rp, rk := plain.next(t), withKeys.next(t)
+	if len(rp.Creds) != 1 || rp.Creds[0].PublicKey != "" {
+		t.Errorf("plain backend must not see keys and sees one deduplicated credential: %+v", rp.Creds)
+	}
+	if len(rk.Creds) != 2 || rk.Creds[0].PublicKey != "ssh-ed25519 SHA256:aaa" || rk.Creds[1].PublicKey != "ssh-rsa SHA256:bbb" {
+		t.Errorf("key backend creds = %+v", rk.Creds)
+	}
+}
+
+func TestRecordKeyFailure_CountsEvenWithEmptyUsername(t *testing.T) {
+	f := keyFake{newFake("keys")}
+	m := newTestManager(1, f)
+
+	if !m.RecordKeyFailure("192.0.2.29", "SSH", "", "ssh-ed25519", "SHA256:ccc") {
+		t.Fatal("a key attempt is a real attempt even without a username")
+	}
+	f.next(t)
+}
+
+func TestRecordKeyFailure_SameKeyIsStoredOnce(t *testing.T) {
+	f := keyFake{newFake("keys")}
+	m := newTestManager(3, f)
+	for i := 0; i < 3; i++ {
+		m.RecordKeyFailure("192.0.2.30", "SSH", "root", "ssh-ed25519", "SHA256:ddd")
+	}
+	if r := f.next(t); len(r.Creds) != 1 {
+		t.Errorf("identical key attempts should be de-duplicated, got %+v", r.Creds)
+	}
+}
+
 func TestRecordFailure_IPsAreTrackedIndependently(t *testing.T) {
 	f := newFake("A")
 	m := newTestManager(2, f)
@@ -586,6 +632,130 @@ func TestNewManager_NoBackendsStartsNoCleanupLoop(t *testing.T) {
 	if len(m.ips) != 1 {
 		t.Error("a cleanup loop is running although there are no backends")
 	}
+}
+
+// ── report on expiry ─────────────────────────────────────────────────────────
+
+// ageOut makes the state of ip look like it was last seen long ago.
+func ageOut(m *Manager, ip string) {
+	m.mu.Lock()
+	m.ips[ip].lastSeen = time.Now().Add(-3 * time.Hour)
+	m.mu.Unlock()
+}
+
+func TestCleanup_ReportsExpiredIPWithMinimumAttempts(t *testing.T) {
+	hook := captureLogs(t)
+	f := newFake("A")
+	m := newTestManager(10, f) // threshold far away, state expiry is 1h
+	ip := "192.0.2.100"
+
+	for i := 0; i < abuseMinimumAttempts; i++ {
+		if m.RecordFailure(ip, "Telnet", fmt.Sprintf("u%d", i), "p") {
+			t.Fatal("must not report below the threshold")
+		}
+	}
+	m.cleanup() // not expired yet
+	f.expectNone(t)
+
+	ageOut(m, ip)
+	m.cleanup()
+
+	r := f.next(t)
+	if r.IP != ip || r.Protocol != "Telnet" || len(r.Creds) != abuseMinimumAttempts {
+		t.Errorf("report = %+v", r)
+	}
+	if _, _, _, ok := snapshot(m, ip); ok {
+		t.Error("expired state was not removed")
+	}
+	if st := m.Stats(); st.ReportsTriggered != 1 || st.SentByBackend["A"] != 1 {
+		t.Errorf("stats = %+v", st)
+	}
+	e := hook.find("state of 192.0.2.100 with enough attempts")
+	if e == nil {
+		t.Fatal("expected a log message for the report on expiry")
+	}
+	if e.Data["backends"] != "A" || e.Data["protocol"] != "Telnet" || e.Data["ip"] != ip {
+		t.Errorf("log fields = %v, want backends, protocol and ip like the threshold message", e.Data)
+	}
+	f.expectNone(t)
+}
+
+func TestCleanup_DoesNotReportBelowMinimumAttempts(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(10, f)
+	ip := "192.0.2.101"
+
+	for i := 0; i < abuseMinimumAttempts-1; i++ {
+		m.RecordFailure(ip, "SSH", "root", fmt.Sprintf("p%d", i))
+	}
+	ageOut(m, ip)
+	m.cleanup()
+
+	f.expectNone(t)
+	if _, _, _, ok := snapshot(m, ip); ok {
+		t.Error("expired state was not removed")
+	}
+}
+
+func TestCleanup_DoesNotCountIgnoredAttemptsTowardsMinimum(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(10, f)
+	ip := "192.0.2.102"
+
+	m.RecordFailure(ip, "SSH", "root", "pw")
+	for i := 0; i < 5; i++ {
+		m.RecordFailure(ip, "SSH", "", "")
+		m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222")
+	}
+	ageOut(m, ip)
+	m.cleanup()
+
+	f.expectNone(t)
+}
+
+func TestCleanup_DoesNotReportAnIPThatWasReportedBefore(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(2, f)
+	ip := "192.0.2.103"
+
+	m.RecordFailure(ip, "SSH", "a", "p")
+	if !m.RecordFailure(ip, "SSH", "b", "p") {
+		t.Fatal("expected the regular report")
+	}
+	f.next(t)
+
+	// More attempts after the cooldown, still below the threshold.
+	m.mu.Lock()
+	m.ips[ip].attempts = abuseMinimumAttempts
+	m.mu.Unlock()
+
+	ageOut(m, ip)
+	m.cleanup()
+
+	f.expectNone(t)
+}
+
+func TestNewManager_MinimumAttemptsNeverExceedsThreshold(t *testing.T) {
+	cases := []struct{ limit, want int }{
+		{1, 1}, {2, 2}, {abuseMinimumAttempts, abuseMinimumAttempts}, {10, abuseMinimumAttempts},
+	}
+	for _, tc := range cases {
+		if got := newTestManager(tc.limit).minAttempts; got != tc.want {
+			t.Errorf("limit %d: minAttempts = %d, want %d", tc.limit, got, tc.want)
+		}
+	}
+}
+
+func TestCleanup_ThresholdBelowMinimumUsesThreshold(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(2, f)
+	ip := "192.0.2.104"
+
+	// A single attempt is below both the threshold (2) and the effective minimum (2).
+	m.RecordFailure(ip, "SSH", "root", "pw")
+	ageOut(m, ip)
+	m.cleanup()
+	f.expectNone(t)
 }
 
 // ── Setup ────────────────────────────────────────────────────────────────────
@@ -921,6 +1091,50 @@ func TestFlush_WaitsForReportsInFlight(t *testing.T) {
 	if flushed, _ := f.stats(); flushed != 1 {
 		t.Errorf("flushed %d reports, want the one that was in flight", flushed)
 	}
+}
+
+// IPs below the threshold but with enough attempts are reported on shutdown, and their report is part of what the backend flushes.
+func TestFlush_ReportsIPsWithMinimumAttempts(t *testing.T) {
+	hook := captureLogs(t)
+	f := &flushFake{fakeBackend: newFake("batching")}
+	m := stoppable(t, newTestManager(10, f))
+
+	for i := 0; i < abuseMinimumAttempts; i++ {
+		m.RecordFailure("192.0.2.110", "Telnet", "root", fmt.Sprintf("p%d", i)) // enough
+	}
+	for i := 0; i < abuseMinimumAttempts-1; i++ {
+		m.RecordFailure("192.0.2.111", "SSH", "root", fmt.Sprintf("p%d", i)) // too few
+	}
+
+	m.Flush(2 * time.Second)
+
+	if flushed, _ := f.stats(); flushed != 1 {
+		t.Errorf("flushed %d reports, want 1 (only the IP with enough attempts)", flushed)
+	}
+	if st := m.Stats(); st.ReportsTriggered != 1 {
+		t.Errorf("ReportsTriggered = %d, want 1", st.ReportsTriggered)
+	}
+	if hook.find("shutting down, 192.0.2.110 with enough attempts") == nil {
+		t.Error("expected a log message for the report on shutdown")
+	}
+
+	// A second flush must not send the same data again.
+	m.Flush(2 * time.Second)
+	if st := m.Stats(); st.ReportsTriggered != 1 {
+		t.Errorf("ReportsTriggered after second Flush = %d, want still 1", st.ReportsTriggered)
+	}
+}
+
+func TestFlush_DoesNotReportIPsThatWereReported(t *testing.T) {
+	f := newFake("A")
+	m := stoppable(t, newTestManager(2, f))
+
+	m.RecordFailure("192.0.2.112", "SSH", "a", "p")
+	m.RecordFailure("192.0.2.112", "SSH", "b", "p") // regular report
+	f.next(t)
+
+	m.Flush(time.Second)
+	f.expectNone(t)
 }
 
 func TestFlush_TimesOutInsteadOfBlockingShutdown(t *testing.T) {

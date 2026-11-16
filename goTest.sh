@@ -4,7 +4,7 @@
 #go get -u ./... && go mod tidy
 
 echo "Run gofmt"
-gofmt -w *.go internal/*/*.go
+find . -type f -name "*.go" -exec gofmt -w {} \;
 
 echo "Run test with cover"
 go test ./... -cover
