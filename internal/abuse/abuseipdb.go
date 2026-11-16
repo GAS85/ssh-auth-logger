@@ -16,9 +16,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Maximum comment length (bytes) https://www.abuseipdb.com/api.html
-const abuseIPDBMaxCommentLen = 1024
-
 const (
 	// Only reports newer than this many days count for the confidence score (API default and maximum used by the web UI).
 	abuseIPDBCheckMaxAgeDays = 30
@@ -26,6 +23,9 @@ const (
 	// Pause of reputation lookups after HTTP 429 if the response has no usable Retry-After header, and the longest pause honoured.
 	abuseIPDBDefaultPause = 15 * time.Minute
 	abuseIPDBMaxPause     = 24 * time.Hour
+
+	// Maximum comment length (bytes) https://www.abuseipdb.com/api.html
+	abuseIPDBMaxCommentLen = 1024
 )
 
 // errAbuseIPDBPaused is returned by LookupReputation while the API quota is exhausted.

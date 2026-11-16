@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ── test server ──────────────────────────────────────────────────────────────
@@ -140,8 +141,11 @@ func TestOTX_ReportQueuesIndicators(t *testing.T) {
 	if q[1].Indicator != "2001:db8::1" || q[1].Type != "IPv6" {
 		t.Errorf("ipv6 indicator = %+v", q[1])
 	}
-	if !strings.Contains(q[0].Description, "SSH") || !strings.Contains(q[1].Description, "Telnet") {
-		t.Errorf("descriptions should name the protocol: %q / %q", q[0].Description, q[1].Description)
+	if !strings.Contains(q[0].Title, "SSH") || !strings.Contains(q[1].Title, "Telnet") {
+		t.Errorf("titles should name the protocol: %q / %q", q[0].Title, q[1].Title)
+	}
+	if q[0].Description != "" || q[1].Description != "" {
+		t.Errorf("without OTX_REPORT_* settings nothing but the IP is shared: %q / %q", q[0].Description, q[1].Description)
 	}
 }
 
@@ -731,6 +735,275 @@ func TestOTX_ReferenceNotSentWhenAppendingToExistingPulse(t *testing.T) {
 	}
 	if strings.Contains(string(reqs[0].raw), "references") {
 		t.Errorf("an existing pulse must not be touched beyond its indicators: %s", reqs[0].raw)
+	}
+}
+
+// ── credentials (OTX_REPORT_*) ───────────────────────────────────────────────
+
+func TestOTX_Sanitize(t *testing.T) {
+	hash := sha1Hex("hunter2")[:8]
+	cases := []struct {
+		name                      string
+		clearUser, clearPW, hashd bool
+		inUser, inPW              string
+		wantUser, wantPW          string
+	}{
+		{"everything off", false, false, false, "root", "hunter2", "", ""},
+		{"clear username only", true, false, false, "root", "hunter2", "root", ""},
+		{"clear password only", false, true, false, "root", "hunter2", "", "hunter2"},
+		{"hashed password", false, false, true, "root", "hunter2", "", hash},
+		{"hashed wins over clear flag", false, true, true, "root", "hunter2", "", hash},
+		{"all on (hashed still wins)", true, true, true, "root", "hunter2", "root", hash},
+		{"empty password is not hashed", true, false, true, "root", "", "root", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newOTXForTest("", func(b *otxBackend) {
+				b.reportClearUsername, b.reportClearPassword, b.reportHashedPassword = tc.clearUser, tc.clearPW, tc.hashd
+			})
+			u, p := b.Sanitize(tc.inUser, tc.inPW)
+			if u != tc.wantUser || p != tc.wantPW {
+				t.Errorf("Sanitize(%q,%q) = (%q,%q), want (%q,%q)", tc.inUser, tc.inPW, u, p, tc.wantUser, tc.wantPW)
+			}
+		})
+	}
+}
+
+func TestOTX_DescriptionCarriesOnlyEnabledCredentials(t *testing.T) {
+	cases := []struct {
+		name                      string
+		clearUser, clearPW, hashd bool
+		want                      string
+		mustNotHave               []string
+	}{
+		{"nothing enabled", false, false, false, "", []string{"root", "secret"}},
+		{"usernames", true, false, false, `usernames=["root" "admin"]`, []string{"secret", "passwords"}},
+		{"clear passwords", false, true, false, `passwords=["secret" "other"]`, []string{"root", "usernames"}},
+		{"hashed passwords", false, false, true, `passwords sha1 prefix=["secret" "other"]`, []string{"root", "passwords=["}},
+		{"usernames and passwords", true, true, false, `usernames=["root" "admin"]; passwords=["secret" "other"]`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newOTXForTest("", func(b *otxBackend) {
+				b.batchSize = 10
+				b.reportClearUsername, b.reportClearPassword, b.reportHashedPassword = tc.clearUser, tc.clearPW, tc.hashd
+			})
+			// duplicates and empty values are skipped
+			b.Report(Report{IP: "198.51.100.1", Protocol: "SSH", Creds: creds("root", "secret", "admin", "other", "root", "secret", "", "")})
+
+			q := b.queued()
+			if len(q) != 1 {
+				t.Fatalf("queued %d, want 1", len(q))
+			}
+			if q[0].Description != tc.want {
+				t.Errorf("description = %q, want %q", q[0].Description, tc.want)
+			}
+			for _, n := range tc.mustNotHave {
+				if strings.Contains(q[0].Description, n) {
+					t.Errorf("description %q must not contain %q", q[0].Description, n)
+				}
+			}
+		})
+	}
+}
+
+func TestOTX_DescriptionGoesOnTheWire(t *testing.T) {
+	srv := newOTXServer(t)
+	b := newOTXForTest(srv.URL, func(b *otxBackend) { b.reportClearUsername = true })
+	b.Report(Report{IP: "198.51.100.1", Protocol: "SSH", Creds: creds("root", "x")})
+	b.Report(otxRep("198.51.100.2", "SSH"))
+
+	got := srv.requests()[0].create(t).Indicators
+	if len(got) != 2 || got[0].Description != `usernames=["root"]` || got[1].Description != "" {
+		t.Errorf("indicators = %+v", got)
+	}
+	// The credential lists are internal: only the description is sent.
+	if raw := string(srv.requests()[0].raw); strings.Contains(raw, `"usernames":`) || strings.Contains(raw, `"passwords":`) {
+		t.Errorf("internal fields must not be serialised: %s", raw)
+	}
+}
+
+// The same IP can be reported twice before the batch is sent: it stays queued once, with the credentials of both reports.
+func TestOTX_DuplicateIPMergesCredentials(t *testing.T) {
+	b := newOTXForTest("", func(b *otxBackend) {
+		b.batchSize = 10
+		b.reportClearUsername = true
+		b.reportHashedPassword = true
+	})
+	b.Report(Report{IP: "198.51.100.1", Protocol: "SSH", Creds: creds("root", "aaaaaaaa")})
+	b.Report(Report{IP: "198.51.100.1", Protocol: "SSH", Creds: creds("root", "bbbbbbbb", "admin", "aaaaaaaa")})
+
+	q := b.queued()
+	if len(q) != 1 {
+		t.Fatalf("queued %d, want 1", len(q))
+	}
+	if want := `usernames=["root" "admin"]; passwords sha1 prefix=["aaaaaaaa" "bbbbbbbb"]`; q[0].Description != want {
+		t.Errorf("description = %q, want %q", q[0].Description, want)
+	}
+}
+
+// ── length limits ────────────────────────────────────────────────────────────
+
+func TestOTX_TitleAndDescriptionAreLimited(t *testing.T) {
+	check := func(t *testing.T, what, s string) {
+		t.Helper()
+		if len(s) > otxMaxCommentLen {
+			t.Errorf("%s is %d bytes, limit %d", what, len(s), otxMaxCommentLen)
+		}
+		if !utf8.ValidString(s) {
+			t.Errorf("%s is not valid UTF-8 after truncation", what)
+		}
+	}
+
+	t.Run("built by Report", func(t *testing.T) {
+		b := newOTXForTest("", func(b *otxBackend) { b.batchSize = 10; b.reportClearUsername = true })
+		var cs []Credential
+		for i := 0; i < 300; i++ {
+			cs = append(cs, Credential{Username: strings.Repeat("ü", 5) + strings.Repeat("€", i%7) + string(rune(0x4e00+i))})
+		}
+		b.Report(Report{IP: "198.51.100.1", Protocol: strings.Repeat("P", 5000), Creds: cs})
+
+		q := b.queued()
+		check(t, "title", q[0].Title)
+		check(t, "description", q[0].Description)
+		if q[0].Description == "" {
+			t.Error("a long description must be cut, not dropped")
+		}
+	})
+
+	t.Run("checked again right before sending", func(t *testing.T) {
+		srv := newOTXServer(t)
+		b := newOTXForTest(srv.URL)
+		// Entries that did not come through Report, e.g. restored from elsewhere.
+		b.batch = []otxIndicator{{
+			Indicator: "198.51.100.1", Type: "IPv4",
+			Title:       strings.Repeat("€", 2000),
+			Description: strings.Repeat("ü", 2000),
+		}}
+		b.flush()
+
+		reqs := srv.requests()
+		if len(reqs) != 1 {
+			t.Fatalf("requests = %d", len(reqs))
+		}
+		ind := reqs[0].create(t).Indicators[0]
+		check(t, "sent title", ind.Title)
+		check(t, "sent description", ind.Description)
+	})
+
+	t.Run("the queue is not changed by sending", func(t *testing.T) {
+		captureLogs(t)
+		srv := newOTXServer(t)
+		srv.setStatus(503)
+		b := newOTXForTest(srv.URL)
+		long := strings.Repeat("a", 3000)
+		b.batch = []otxIndicator{{Indicator: "198.51.100.1", Type: "IPv4", Title: long}}
+		b.flush()
+		if q := b.queued(); len(q) != 1 || q[0].Title != long {
+			t.Error("a failed submit must requeue the entries as they were")
+		}
+	})
+}
+
+// ── pulse description ────────────────────────────────────────────────────────
+
+func TestOTX_PulseDescriptionOnlyClaimsNoCredentialsWhenTrue(t *testing.T) {
+	cases := []struct {
+		name                      string
+		clearUser, clearPW, hashd bool
+		wantNo                    bool
+		want                      []string
+	}{
+		{"nothing shared", false, false, false, true, nil},
+		{"usernames", true, false, false, false, []string{"usernames"}},
+		{"hashed passwords", false, false, true, false, []string{"SHA-1"}},
+		{"clear passwords", false, true, false, false, []string{"clear text"}},
+		{"usernames and hashed passwords", true, false, true, false, []string{"usernames", "SHA-1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newOTXServer(t)
+			b := newOTXForTest(srv.URL, func(b *otxBackend) {
+				b.reportClearUsername, b.reportClearPassword, b.reportHashedPassword = tc.clearUser, tc.clearPW, tc.hashd
+			})
+			b.Report(otxRep("198.51.100.1", "SSH"))
+			b.Report(otxRep("198.51.100.2", "SSH"))
+
+			d := srv.requests()[0].create(t).Description
+			if got := strings.Contains(d, "No credentials are shared"); got != tc.wantNo {
+				t.Errorf("description %q: claims no credentials = %v, want %v", d, got, tc.wantNo)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(d, w) {
+					t.Errorf("description %q lacks %q", d, w)
+				}
+			}
+		})
+	}
+}
+
+// ── environment: credentials and TLP ─────────────────────────────────────────
+
+func TestNewOTXFromEnv_CredentialSettingsAndTLP(t *testing.T) {
+	cases := []struct {
+		name      string
+		kv        []string
+		wantTLP   string
+		wantFatal string // part of the fatal message; empty if the configuration is valid
+		wantUser  bool
+		wantClear bool
+		wantHash  bool
+	}{
+		{"nothing shared: white by default", nil, "white", "", false, false, false},
+		{"usernames: green by default", []string{"OTX_REPORT_CLEAR_USERNAME", "true"}, "green", "", true, false, false},
+		{"hashed passwords: green by default", []string{"OTX_REPORT_HASHED_PASSWORD", "true"}, "green", "", false, false, true},
+		{"usernames with explicit green", []string{"OTX_REPORT_CLEAR_USERNAME", "true", "OTX_TLP", "green"}, "green", "", true, false, false},
+		{"usernames with amber (private)", []string{"OTX_REPORT_CLEAR_USERNAME", "true", "OTX_TLP", "amber", "OTX_PUBLIC", "false"}, "amber", "", true, false, false},
+		{"clear passwords: red by default", []string{"OTX_REPORT_CLEAR_PASSWORD", "true", "OTX_PUBLIC", "false"}, "red", "", false, true, false},
+		{"hashed beats clear password", []string{"OTX_REPORT_CLEAR_PASSWORD", "true", "OTX_REPORT_HASHED_PASSWORD", "true"}, "green", "", false, false, true},
+
+		{"usernames with white", []string{"OTX_REPORT_CLEAR_USERNAME", "true", "OTX_TLP", "white"}, "", "OTX_TLP", false, false, false},
+		{"hashed passwords with white", []string{"OTX_REPORT_HASHED_PASSWORD", "true", "OTX_TLP", "white"}, "", "OTX_TLP", false, false, false},
+		{"clear passwords with green", []string{"OTX_REPORT_CLEAR_PASSWORD", "true", "OTX_TLP", "green"}, "", "OTX_TLP", false, false, false},
+		{"clear passwords with white", []string{"OTX_REPORT_CLEAR_PASSWORD", "true", "OTX_TLP", "white"}, "", "OTX_TLP", false, false, false},
+		{"clear passwords with amber", []string{"OTX_REPORT_CLEAR_PASSWORD", "true", "OTX_TLP", "amber", "OTX_PUBLIC", "false"}, "", "OTX_TLP", false, false, false},
+		{"clear passwords need a private pulse", []string{"OTX_REPORT_CLEAR_PASSWORD", "true"}, "", "OTX_PUBLIC", false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useEnv(t, append([]string{"OTX_ENABLED", "true", "OTX_API_KEY", "k"}, tc.kv...)...)
+
+			if tc.wantFatal != "" {
+				msg := expectFatal(t, func() { newOTXFromEnv() })
+				if !strings.Contains(msg, tc.wantFatal) {
+					t.Errorf("message %q does not mention %s", msg, tc.wantFatal)
+				}
+				return
+			}
+
+			be, fields := newOTXFromEnv()
+			b := be.(*otxBackend)
+			t.Cleanup(b.stop)
+
+			if b.tlp != tc.wantTLP {
+				t.Errorf("tlp = %q, want %q", b.tlp, tc.wantTLP)
+			}
+			if b.reportClearUsername != tc.wantUser || b.reportClearPassword != tc.wantClear || b.reportHashedPassword != tc.wantHash {
+				t.Errorf("flags = user:%v clear:%v hashed:%v, want %v/%v/%v",
+					b.reportClearUsername, b.reportClearPassword, b.reportHashedPassword, tc.wantUser, tc.wantClear, tc.wantHash)
+			}
+
+			otxFields, ok := asFields(fields["otx"])
+			if !ok {
+				t.Fatalf("fields[otx] = %T", fields["otx"])
+			}
+			if otxFields["OTX_REPORT_CLEAR_USERNAME"] != tc.wantUser ||
+				otxFields["OTX_REPORT_CLEAR_PASSWORD"] != tc.wantClear ||
+				otxFields["OTX_REPORT_HASHED_PASSWORD"] != tc.wantHash ||
+				otxFields["OTX_TLP"] != tc.wantTLP {
+				t.Errorf("startup fields must show the effective settings: %v", otxFields)
+			}
+		})
 	}
 }
 

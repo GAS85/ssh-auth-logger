@@ -36,6 +36,9 @@ const (
 
 	// If the API is unreachable, keep at most batchSize*otxMaxQueueFactor indicators; the oldest are dropped first.
 	otxMaxQueueFactor = 4
+
+	// Title and Description are limited to 1024, so common limiter used
+	otxMaxCommentLen = 1024
 )
 
 // otxIndicator is one entry of a pulse.
@@ -43,7 +46,12 @@ type otxIndicator struct {
 	Indicator   string `json:"indicator"`
 	Type        string `json:"type"` // "IPv4" or "IPv6"
 	Role        string `json:"role,omitempty"`
+	Title       string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
+
+	// Credentials seen for this IP while it waits in the queue, already filtered by the report settings. They are not sent as fields: they are rendered into Description.
+	usernames []string
+	passwords []string
 }
 
 // otxCreateBody is the request body of POST /api/v1/pulses/create.
@@ -65,7 +73,7 @@ type otxEditBody struct {
 }
 
 // otxBackend shares attacking IPs as indicators of a pulse at https://otx.alienvault.com
-// No credentials are ever collected: a pulse is (by default) public, and OTX indicators are IPs only.
+// By default no credentials are collected: a pulse is (by default) public. Usernames and passwords (hashed, or in clear text) can be added to the indicator description with OTX_REPORT_*, which also restricts the TLP of the pulse.
 type otxBackend struct {
 	apiKey  string
 	baseURL string
@@ -75,6 +83,11 @@ type otxBackend struct {
 	tlp       string
 	tags      []string
 	role      string
+
+	// What may be shared in the description of an indicator (OTX_REPORT_*). Nothing by default.
+	reportClearUsername  bool
+	reportClearPassword  bool
+	reportHashedPassword bool
 
 	batchSize  int
 	flushEvery time.Duration
@@ -116,16 +129,40 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 
 	public := envBool("OTX_PUBLIC", "true")
 
-	tlp := strings.ToLower(getenv("OTX_TLP", "white"))
-	switch tlp {
-	case "white", "green":
-	case "amber", "red":
-		// OTX rejects public pulses with these TLP values.
-		if public {
-			logrus.Fatal("Invalid OTX_TLP environment variable: amber and red pulses must be private (set OTX_PUBLIC=false)")
+	// What is shared besides the IP. As for AbuseIPDB, ..._HASHED_PASSWORD takes precedence over ..._CLEAR_PASSWORD, so cleartext passwords are never collected or sent if both are set.
+	clearUsername := envBool("OTX_REPORT_CLEAR_USERNAME", "false")
+	hashedPassword := envBool("OTX_REPORT_HASHED_PASSWORD", "false")
+	clearPassword := envBool("OTX_REPORT_CLEAR_PASSWORD", "false") && !hashedPassword
+
+	// Pulses are read by others: the more is shared, the more restricted the pulse has to be.
+	//   nothing shared:                   white (default) or higher
+	//   usernames / hashed passwords:     not white; green is the default
+	//   cleartext passwords:              red only
+	tlp := strings.ToLower(getenv("OTX_TLP", ""))
+	if tlp == "" {
+		switch {
+		case clearPassword:
+			tlp = "red"
+		case clearUsername || hashedPassword:
+			tlp = "green"
+		default:
+			tlp = "white"
 		}
+	}
+	switch tlp {
+	case "white", "green", "amber", "red":
 	default:
 		logrus.Fatal("Invalid OTX_TLP environment variable (use white, green, amber or red)")
+	}
+	if (tlp == "amber" || tlp == "red") && public {
+		// OTX rejects public pulses with these TLP values.
+		logrus.Fatal("Invalid OTX_TLP environment variable: amber and red pulses must be private (set OTX_PUBLIC=false)")
+	}
+	if clearPassword && tlp != "red" {
+		logrus.Fatal("Invalid OTX_TLP environment variable: with OTX_REPORT_CLEAR_PASSWORD only red is allowed (and OTX_PUBLIC=false)")
+	}
+	if (clearUsername || hashedPassword) && tlp == "white" {
+		logrus.Fatal("Invalid OTX_TLP environment variable: white is not allowed with OTX_REPORT_CLEAR_USERNAME or OTX_REPORT_HASHED_PASSWORD (use green or higher)")
 	}
 
 	var tags []string
@@ -146,6 +183,10 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 		tags:      tags,
 		// Optional OTX indicator role (e.g. "scanning_host"). An unknown role is rejected by the API.
 		role: getenv("OTX_INDICATOR_ROLE", "bruteforce"),
+
+		reportClearUsername:  clearUsername,
+		reportClearPassword:  clearPassword,
+		reportHashedPassword: hashedPassword,
 
 		batchSize:  batchSize,
 		flushEvery: flushEvery,
@@ -170,6 +211,11 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 			"OTX_TLP":            b.tlp,
 			"OTX_TAGS":           strings.Join(b.tags, ","),
 			"OTX_INDICATOR_ROLE": b.role,
+
+			"OTX_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
+			"OTX_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
+			"OTX_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
+
 			"OTX_BATCH_SIZE":     b.batchSize,
 			"OTX_BATCH_INTERVAL": b.flushEvery.String(),
 		},
@@ -178,8 +224,73 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 
 func (b *otxBackend) Name() string { return "OTX" }
 
-// Sanitize drops everything: OTX indicators are IP addresses, usernames and passwords are never retained or sent.
-func (b *otxBackend) Sanitize(string, string) (string, string) { return "", "" }
+// Sanitize keeps usernames / passwords only if explicitly enabled, exactly like AbuseIPDB. Hashed passwords are cut to the first 8 symbols, as a full SHA1 is easy to revert.
+func (b *otxBackend) Sanitize(username, password string) (string, string) {
+	if !b.reportClearUsername {
+		username = ""
+	}
+
+	switch {
+	case password == "":
+	case b.reportHashedPassword:
+		password = sha1Hex(password)[:8]
+	case b.reportClearPassword:
+	default:
+		password = ""
+	}
+
+	return username, password
+}
+
+// describe renders the credentials of an indicator as its description, empty if nothing may be shared.
+func (b *otxBackend) describe(ind otxIndicator) string {
+	var parts []string
+
+	if b.reportClearUsername && len(ind.usernames) > 0 {
+		parts = append(parts, fmt.Sprintf("usernames=%q", ind.usernames))
+	}
+
+	if (b.reportClearPassword || b.reportHashedPassword) && len(ind.passwords) > 0 {
+		field := "passwords"
+		if b.reportHashedPassword {
+			field = "passwords sha1 prefix"
+		}
+		parts = append(parts, fmt.Sprintf("%s=%q", field, ind.passwords))
+	}
+
+	return truncateUTF8(strings.Join(parts, "; "), otxMaxCommentLen)
+}
+
+// pulseDescription is the description of a new pulse. It says that no credentials are shared only if that is true.
+func (b *otxBackend) pulseDescription() string {
+	d := "Source IPs of SSH/Telnet password guessing observed by an GAS85/ssh-auth-logger honeypot (" + otxReferenceURL + ")."
+
+	var shared []string
+	if b.reportClearUsername {
+		shared = append(shared, "usernames")
+	}
+	if b.reportHashedPassword {
+		shared = append(shared, "the first 8 characters of the SHA-1 hash of passwords")
+	} else if b.reportClearPassword {
+		shared = append(shared, "passwords in clear text")
+	}
+
+	if len(shared) == 0 {
+		return d + " No credentials are shared."
+	}
+	return d + " The indicator descriptions include: " + strings.Join(shared, ", ") + "."
+}
+
+// limitIndicators returns a copy of batch in which Title and Description fit the OTX limits.
+func limitIndicators(batch []otxIndicator) []otxIndicator {
+	out := make([]otxIndicator, len(batch))
+	for i, ind := range batch {
+		ind.Title = truncateUTF8(ind.Title, otxMaxCommentLen)
+		ind.Description = truncateUTF8(ind.Description, otxMaxCommentLen)
+		out[i] = ind
+	}
+	return out
+}
 
 // Report queues the IP and submits the batch once it is large enough. The remaining entries are sent by flushLoop.
 func (b *otxBackend) Report(rep Report) {
@@ -195,19 +306,39 @@ func (b *otxBackend) Report(rep Report) {
 	}
 
 	ind := otxIndicator{
-		Indicator:   rep.IP,
-		Type:        typ,
-		Role:        b.role,
-		Description: fmt.Sprintf("%s authentication brute-force attempts against a honeypot", rep.Protocol),
+		Indicator: rep.IP,
+		Type:      typ,
+		Role:      b.role,
+		Title:     truncateUTF8(fmt.Sprintf("%s authentication brute-force attempts against a honeypot", rep.Protocol), otxMaxCommentLen),
 	}
 
-	b.mu.Lock()
-	// OTX rejects duplicates inside one request, and the same IP may be reported again after the cooldown.
-	for _, q := range b.batch {
-		if q.Indicator == ind.Indicator {
-			b.mu.Unlock()
-			return
+	// The credentials were already filtered by Sanitize; the settings are checked again, so nothing is ever shared by accident.
+	for _, c := range rep.Creds {
+		if b.reportClearUsername && c.Username != "" {
+			ind.usernames = appendUnique(ind.usernames, c.Username)
 		}
+		if (b.reportClearPassword || b.reportHashedPassword) && c.Password != "" {
+			ind.passwords = appendUnique(ind.passwords, c.Password)
+		}
+	}
+	ind.Description = b.describe(ind)
+
+	b.mu.Lock()
+	// OTX rejects duplicates inside one request, and the same IP may be reported again after the cooldown. The IP stays queued once, with the credentials of all its reports.
+	for i := range b.batch {
+		if b.batch[i].Indicator != ind.Indicator {
+			continue
+		}
+		q := &b.batch[i]
+		for _, u := range ind.usernames {
+			q.usernames = appendUnique(q.usernames, u)
+		}
+		for _, p := range ind.passwords {
+			q.passwords = appendUnique(q.passwords, p)
+		}
+		q.Description = b.describe(*q)
+		b.mu.Unlock()
+		return
 	}
 	b.batch = append(b.batch, ind)
 	full := len(b.batch) >= b.batchSize
@@ -296,6 +427,9 @@ func (b *otxBackend) submit(batch []otxIndicator) (retry bool, err error) {
 	pulseID := b.pulseID
 	b.mu.Unlock()
 
+	// Title and Description are checked right before sending, whatever put the entries in the queue.
+	batch = limitIndicators(batch)
+
 	var (
 		method = http.MethodPost
 		path   = otxCreatePath
@@ -305,7 +439,7 @@ func (b *otxBackend) submit(batch []otxIndicator) (retry bool, err error) {
 	if pulseID == "" {
 		body, err = json.Marshal(otxCreateBody{
 			Name:        b.pulseName,
-			Description: "Source IPs of SSH/Telnet password guessing observed by an GAS85/ssh-auth-logger honeypot (https://github.com/GAS85/ssh-auth-logger). No credentials are shared.",
+			Description: truncateUTF8(b.pulseDescription(), otxMaxCommentLen),
 			Public:      b.public,
 			TLP:         b.tlp,
 			Tags:        b.tags,
