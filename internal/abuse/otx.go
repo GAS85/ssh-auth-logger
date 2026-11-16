@@ -50,8 +50,9 @@ type otxIndicator struct {
 	Description string `json:"description,omitempty"`
 
 	// Credentials seen for this IP while it waits in the queue, already filtered by the report settings. They are not sent as fields: they are rendered into Description.
-	usernames []string
-	passwords []string
+	usernames  []string
+	passwords  []string
+	publicKeys []string // fingerprints of offered SSH public keys
 }
 
 // otxCreateBody is the request body of POST /api/v1/pulses/create.
@@ -224,6 +225,12 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 
 func (b *otxBackend) Name() string { return "OTX" }
 
+// sharesPublicKeys tells whether public key fingerprints are added to the indicators: only together with passwords (hashed or in clear text), as in the AbuseIPDB comment they are an addition to the password information.
+func (b *otxBackend) sharesPublicKeys() bool { return b.reportClearPassword || b.reportHashedPassword }
+
+// ReportsPublicKeys implements PublicKeyReporter: public keys are public, so their fingerprints are reported whenever passwords are, hashed or in clear text.
+func (b *otxBackend) ReportsPublicKeys() bool { return b.sharesPublicKeys() }
+
 // Sanitize keeps usernames / passwords only if explicitly enabled, exactly like AbuseIPDB. Hashed passwords are cut to the first 8 symbols, as a full SHA1 is easy to revert.
 func (b *otxBackend) Sanitize(username, password string) (string, string) {
 	if !b.reportClearUsername {
@@ -258,6 +265,10 @@ func (b *otxBackend) describe(ind otxIndicator) string {
 		parts = append(parts, fmt.Sprintf("%s=%q", field, ind.passwords))
 	}
 
+	if b.sharesPublicKeys() && len(ind.publicKeys) > 0 {
+		parts = append(parts, fmt.Sprintf("public key fingerprints=%q", ind.publicKeys))
+	}
+
 	return truncateUTF8(strings.Join(parts, "; "), otxMaxCommentLen)
 }
 
@@ -273,6 +284,10 @@ func (b *otxBackend) pulseDescription() string {
 		shared = append(shared, "the first 8 characters of the SHA-1 hash of passwords")
 	} else if b.reportClearPassword {
 		shared = append(shared, "passwords in clear text")
+	}
+
+	if b.sharesPublicKeys() {
+		shared = append(shared, "fingerprints of public keys")
 	}
 
 	if len(shared) == 0 {
@@ -320,6 +335,9 @@ func (b *otxBackend) Report(rep Report) {
 		if (b.reportClearPassword || b.reportHashedPassword) && c.Password != "" {
 			ind.passwords = appendUnique(ind.passwords, c.Password)
 		}
+		if b.sharesPublicKeys() && c.PublicKey != "" {
+			ind.publicKeys = appendUnique(ind.publicKeys, c.PublicKey)
+		}
 	}
 	ind.Description = b.describe(ind)
 
@@ -335,6 +353,9 @@ func (b *otxBackend) Report(rep Report) {
 		}
 		for _, p := range ind.passwords {
 			q.passwords = appendUnique(q.passwords, p)
+		}
+		for _, k := range ind.publicKeys {
+			q.publicKeys = appendUnique(q.publicKeys, k)
 		}
 		q.Description = b.describe(*q)
 		b.mu.Unlock()

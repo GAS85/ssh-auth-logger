@@ -1063,3 +1063,156 @@ func TestOTX_ManagerFlushSendsReportTriggeredJustBefore(t *testing.T) {
 		t.Errorf("indicators = %+v", got)
 	}
 }
+
+// ── public keys ──────────────────────────────────────────────────────────────
+
+var _ PublicKeyReporter = (*otxBackend)(nil)
+
+func keyCreds(keys ...string) []Credential {
+	var out []Credential
+	for _, k := range keys {
+		out = append(out, Credential{Time: time.Now(), PublicKey: k})
+	}
+	return out
+}
+
+// Public key fingerprints are shared whenever passwords are (hashed or in clear text), and only then.
+func TestOTX_ReportsPublicKeysOnlyWithPasswords(t *testing.T) {
+	cases := []struct {
+		name                      string
+		clearUser, clearPW, hashd bool
+		want                      bool
+	}{
+		{"nothing enabled", false, false, false, false},
+		{"usernames only", true, false, false, false},
+		{"clear passwords", false, true, false, true},
+		{"hashed passwords", false, false, true, true},
+		{"hashed and clear flag", false, true, true, true},
+		{"everything", true, true, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newOTXForTest("", func(b *otxBackend) {
+				b.reportClearUsername, b.reportClearPassword, b.reportHashedPassword = tc.clearUser, tc.clearPW, tc.hashd
+			})
+			if got := b.ReportsPublicKeys(); got != tc.want {
+				t.Errorf("ReportsPublicKeys() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOTX_DescriptionCarriesPublicKeys(t *testing.T) {
+	cases := []struct {
+		name                      string
+		clearUser, clearPW, hashd bool
+		want                      string
+	}{
+		{"nothing enabled", false, false, false, ""},
+		{"usernames only", true, false, false, `usernames=["root"]`},
+		{"clear passwords", false, true, false, `passwords=["secret"]; public key fingerprints=["SHA256:aaa" "SHA256:bbb"]`},
+		{"hashed passwords", false, false, true, `passwords sha1 prefix=["secret"]; public key fingerprints=["SHA256:aaa" "SHA256:bbb"]`},
+		{"all", true, true, false, `usernames=["root"]; passwords=["secret"]; public key fingerprints=["SHA256:aaa" "SHA256:bbb"]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newOTXForTest("", func(b *otxBackend) {
+				b.batchSize = 10
+				b.reportClearUsername, b.reportClearPassword, b.reportHashedPassword = tc.clearUser, tc.clearPW, tc.hashd
+			})
+			// duplicates are skipped
+			rep := Report{IP: "198.51.100.1", Protocol: "SSH", Creds: creds("root", "secret")}
+			rep.Creds = append(rep.Creds, keyCreds("SHA256:aaa", "SHA256:bbb", "SHA256:aaa", "")...)
+			b.Report(rep)
+
+			q := b.queued()
+			if len(q) != 1 {
+				t.Fatalf("queued %d, want 1", len(q))
+			}
+			if q[0].Description != tc.want {
+				t.Errorf("description = %q, want %q", q[0].Description, tc.want)
+			}
+			if !tc.clearPW && !tc.hashd && strings.Contains(q[0].Description, "SHA256:") {
+				t.Error("public keys must not be shared without password reporting")
+			}
+		})
+	}
+}
+
+// A client that only offers keys (no password) is still reported with its fingerprints.
+func TestOTX_PublicKeysWithoutPassword(t *testing.T) {
+	b := newOTXForTest("", func(b *otxBackend) { b.batchSize = 10; b.reportHashedPassword = true })
+	b.Report(Report{IP: "198.51.100.1", Protocol: "SSH", Creds: keyCreds("SHA256:aaa")})
+
+	if got, want := b.queued()[0].Description, `public key fingerprints=["SHA256:aaa"]`; got != want {
+		t.Errorf("description = %q, want %q", got, want)
+	}
+}
+
+func TestOTX_DuplicateIPMergesPublicKeys(t *testing.T) {
+	b := newOTXForTest("", func(b *otxBackend) { b.batchSize = 10; b.reportHashedPassword = true })
+	b.Report(Report{IP: "198.51.100.1", Protocol: "SSH", Creds: keyCreds("SHA256:aaa")})
+	b.Report(Report{IP: "198.51.100.1", Protocol: "SSH", Creds: keyCreds("SHA256:bbb", "SHA256:aaa")})
+
+	q := b.queued()
+	if len(q) != 1 {
+		t.Fatalf("queued %d, want 1", len(q))
+	}
+	if want := `public key fingerprints=["SHA256:aaa" "SHA256:bbb"]`; q[0].Description != want {
+		t.Errorf("description = %q, want %q", q[0].Description, want)
+	}
+}
+
+func TestOTX_PublicKeysGoOnTheWire(t *testing.T) {
+	srv := newOTXServer(t)
+	b := newOTXForTest(srv.URL, func(b *otxBackend) { b.reportHashedPassword = true })
+	b.Report(Report{IP: "198.51.100.1", Protocol: "SSH", Creds: keyCreds("SHA256:aaa")})
+	b.Report(otxRep("198.51.100.2", "SSH"))
+
+	got := srv.requests()[0].create(t).Indicators
+	if len(got) != 2 || got[0].Description != `public key fingerprints=["SHA256:aaa"]` || got[1].Description != "" {
+		t.Errorf("indicators = %+v", got)
+	}
+	if raw := string(srv.requests()[0].raw); strings.Contains(raw, `"publicKeys"`) || strings.Contains(raw, `"publickeys"`) {
+		t.Errorf("internal fields must not be serialised: %s", raw)
+	}
+}
+
+// Keys are the last part of the description, so a long description loses keys first and stays valid UTF-8.
+func TestOTX_PublicKeysAreCutFirstWhenDescriptionIsTooLong(t *testing.T) {
+	b := newOTXForTest("", func(b *otxBackend) { b.batchSize = 10; b.reportClearPassword = true })
+	rep := Report{IP: "198.51.100.1", Protocol: "SSH"}
+	for i := 0; i < 40; i++ {
+		rep.Creds = append(rep.Creds, Credential{Password: strings.Repeat("ü", 20) + itoa(i)})
+		rep.Creds = append(rep.Creds, Credential{PublicKey: "SHA256:" + strings.Repeat("k", 43) + itoa(i)})
+	}
+	b.Report(rep)
+
+	d := b.queued()[0].Description
+	if len(d) > otxMaxCommentLen || !utf8.ValidString(d) {
+		t.Errorf("description is %d bytes, valid=%v", len(d), utf8.ValidString(d))
+	}
+	if !strings.HasPrefix(d, "passwords=[") {
+		t.Errorf("passwords must come first: %.40q", d)
+	}
+}
+
+func TestOTX_PulseDescriptionMentionsPublicKeysOnlyWhenShared(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mod  func(*otxBackend)
+		want bool
+	}{
+		{"nothing shared", func(*otxBackend) {}, false},
+		{"usernames only", func(b *otxBackend) { b.reportClearUsername = true }, false},
+		{"hashed passwords", func(b *otxBackend) { b.reportHashedPassword = true }, true},
+		{"clear passwords", func(b *otxBackend) { b.reportClearPassword = true }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newOTXForTest("", tc.mod).pulseDescription()
+			if got := strings.Contains(d, "public keys"); got != tc.want {
+				t.Errorf("description %q: mentions public keys = %v, want %v", d, got, tc.want)
+			}
+		})
+	}
+}
