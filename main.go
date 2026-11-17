@@ -950,6 +950,13 @@ func getEnvWithDefault(key, fallback string) string {
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
+	// Read LOG_LEVEL variable to give user control on a log level
+	level, err := logrus.ParseLevel(strings.ToLower(os.Getenv("LOG_LEVEL")))
+	if err != nil {
+		level = logrus.InfoLevel
+	}
+	logrus.SetLevel(level)
+
 	// Log destination: LOG_TO=console (default), file or both. Until the startup message is out, everything is also written to the console (see logOutputs), so the configuration is always visible there; afterwards only LOG_TO decides.
 	logFilePath := getEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
 	// On the console, info and debug lines go to stdout, warnings and above to stderr; a log file gets both.
