@@ -279,6 +279,12 @@ func (m *Manager) record(ip, protocol, username, password, publicKey string) boo
 		return false
 	}
 
+	// A protocol probe (HTTP request line or TLS handshake sent to the SSH/Telnet port) is not a login attempt. It is dropped here, before any state is touched, so it neither counts towards the threshold nor is remembered: otherwise it would be handed to every backend (AbuseIPDB, OTX, DShield, ...) as a username/password the next time the IP is reported.
+	if isProtocolProbe(username) {
+		logger.WithField("ip", ip).Debug("Port scan detected, will not report it")
+		return false
+	}
+
 	now := time.Now()
 
 	m.mu.Lock()
@@ -309,16 +315,6 @@ func (m *Manager) record(ip, protocol, username, password, publicKey string) boo
 
 	// An attempt with an empty username, an empty password and no public key (judged on the raw input, before any backend sanitizing) is still remembered above, but it does not count towards the report threshold and can never trigger a report on its own.
 	if username == "" && password == "" && publicKey == "" {
-		m.mu.Unlock()
-		return false
-	}
-
-	// An HTTP port scan attempt is skipped as well. Report shall not be send.
-	// We could also exclude \u0016\u0003\u0001\u0000... or \x16\x03 as this is TLS start prefix
-
-	// if username == "GET / HTTP/1.1" {
-	if strings.HasPrefix(username, "GET /") || strings.HasPrefix(username, "\x16\x03") {
-		// logger.Info("HTTP(s) Request ignored")
 		m.mu.Unlock()
 		return false
 	}
@@ -554,6 +550,11 @@ func (m *Manager) cleanupReputation(now time.Time) {
 			"remaining": len(m.rep),
 		}).Debug("Abuse: expired IP reputation entries purged")
 	}
+}
+
+// isProtocolProbe reports whether username is really the first bytes of another protocol sent to the SSH/Telnet port: an HTTP request line ("GET / HTTP/1.1", the "password" is then the Host header) or the start of a TLS handshake (record header 0x16 0x03).
+func isProtocolProbe(username string) bool {
+	return strings.HasPrefix(username, "GET /") || strings.HasPrefix(username, "\x16\x03")
 }
 
 // addCredential appends c unless the same username/password pair is already present or the per-window cap has been reached.

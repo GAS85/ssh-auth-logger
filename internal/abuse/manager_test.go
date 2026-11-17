@@ -296,9 +296,9 @@ func TestRecordFailure_HTTPRequestLineDoesNotCountTowardsThreshold(t *testing.T)
 	}
 	f.expectNone(t)
 
-	attempts, _, _, ok := snapshot(m, ip)
-	if !ok || attempts != 0 {
-		t.Errorf("attempts after HTTP scans = %d (tracked=%v), want 0", attempts, ok)
+	// Probes are dropped before any state is created.
+	if attempts, _, _, ok := snapshot(m, ip); ok {
+		t.Errorf("an IP that only sent probes must not be tracked (attempts=%d)", attempts)
 	}
 
 	// Real attempts from the same IP still count; the scan lines in between do not.
@@ -312,6 +312,68 @@ func TestRecordFailure_HTTPRequestLineDoesNotCountTowardsThreshold(t *testing.T)
 		t.Fatal("second real attempt should report")
 	}
 	f.next(t)
+}
+
+// The probe must not only be left out of the count, it must never reach a backend: AbuseIPDB, OTX and DShield all publish the usernames / passwords of a report.
+func TestRecordFailure_ProbesAreNotPassedToBackends(t *testing.T) {
+	plain := newFake("plain")
+	withKeys := keyFake{newFake("keys")}
+	m := stoppable(t, newTestManager(2, plain, withKeys))
+	ip := "192.0.2.28"
+	tls := "\x16\x03\x01\x00"
+
+	m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222")
+	m.RecordFailure(ip, "SSH", "root", "pw1")
+	m.RecordFailure(ip, "Telnet", tls, "junk")
+	m.RecordFailure(ip, "SSH", "GET /admin HTTP/1.1", "Host: 198.51.100.7:2222")
+	if !m.RecordFailure(ip, "SSH", "admin", "pw2") {
+		t.Fatal("two real attempts must trigger the report")
+	}
+
+	for _, f := range []*fakeBackend{plain, withKeys.fakeBackend} {
+		rep := f.next(t)
+		if len(rep.Creds) != 2 {
+			t.Fatalf("%s: got %d credentials %+v, want only the 2 real ones", f.name, len(rep.Creds), rep.Creds)
+		}
+		for _, c := range rep.Creds {
+			if strings.HasPrefix(c.Username, "GET /") || strings.HasPrefix(c.Username, "\x16\x03") || strings.HasPrefix(c.Password, "Host:") || c.Password == "junk" {
+				t.Errorf("%s: probe leaked into the report: %+v", f.name, c)
+			}
+		}
+	}
+}
+
+// Probes arriving while the IP is in its cooldown must not be kept for the next report either.
+func TestRecordFailure_ProbesDuringCooldownAreNotRetained(t *testing.T) {
+	f := newFake("A")
+	m := stoppable(t, newTestManager(1, f))
+	ip := "192.0.2.29"
+
+	if !m.RecordFailure(ip, "SSH", "root", "pw") {
+		t.Fatal("first attempt must report")
+	}
+	f.next(t)
+
+	m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222")
+	m.RecordFailure(ip, "SSH", "\x16\x03\x01", "")
+	m.RecordFailure(ip, "SSH", "admin", "x")
+
+	_, _, creds, ok := snapshot(m, ip)
+	if !ok || len(creds[0]) != 1 || creds[0][0].Username != "admin" {
+		t.Errorf("retained credentials = %+v, want only the real attempt", creds)
+	}
+}
+
+func TestIsProtocolProbe(t *testing.T) {
+	for in, want := range map[string]bool{
+		"GET / HTTP/1.1": true, "GET /admin": true, "GET /": true,
+		"\x16\x03\x01\x00": true, "\x16\x03": true,
+		"": false, "root": false, "GET": false, "get /": false, "POST / HTTP/1.1": false, "\x16": false, "xGET /": false,
+	} {
+		if got := isProtocolProbe(in); got != want {
+			t.Errorf("isProtocolProbe(%q) = %v, want %v", in, got, want)
+		}
+	}
 }
 
 // Only the exact request line is exempt: other usernames that merely look similar still count.
