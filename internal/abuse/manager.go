@@ -314,7 +314,11 @@ func (m *Manager) record(ip, protocol, username, password, publicKey string) boo
 	}
 
 	// An HTTP port scan attempt is skipped as well. Report shall not be send.
-	if username == "GET / HTTP/1.1" {
+	// We could also exclude \u0016\u0003\u0001\u0000... or \x16\x03 as this is TLS start prefix
+
+	// if username == "GET / HTTP/1.1" {
+	if strings.HasPrefix(username, "GET /") || strings.HasPrefix(username, "\x16\x03") {
+		// logger.Info("HTTP(s) Request ignored")
 		m.mu.Unlock()
 		return false
 	}

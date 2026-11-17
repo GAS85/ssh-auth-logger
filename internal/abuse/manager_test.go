@@ -265,6 +265,7 @@ func TestRecordFailure_HTTPRequestLineDoesNotCountTowardsThreshold(t *testing.T)
 	f := newFake("A")
 	m := newTestManager(2, f)
 	ip := "192.0.2.26"
+	tlsUsername := "\x16\x03\x01\x00"
 
 	for i := 0; i < 10; i++ {
 		pw := fmt.Sprintf("Host: 198.51.100.7:%d", 2222+i)
@@ -274,9 +275,24 @@ func TestRecordFailure_HTTPRequestLineDoesNotCountTowardsThreshold(t *testing.T)
 		if m.RecordFailure(ip, "Telnet", "GET / HTTP/1.1", pw) {
 			t.Fatalf("HTTP scan attempt %d (telnet) must not trigger a report", i)
 		}
+		if m.RecordFailure(ip, "SSH", "GET /admin HTTP/1.1", pw) {
+			t.Fatalf("HTTP scan attempt %d must not trigger a report", i)
+		}
+		if m.RecordFailure(ip, "Telnet", "GET /admin HTTP/1.1", pw) {
+			t.Fatalf("HTTP scan attempt %d (telnet) must not trigger a report", i)
+		}
+		// TLS Test
+		if m.RecordFailure(ip, "Telnet", tlsUsername, pw) {
+			t.Fatalf("TLS scan attempt %d must not trigger a report", i)
+		}
 	}
 	if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "") {
 		t.Fatal("HTTP scan attempt with empty password must not trigger a report")
+	}
+	f.expectNone(t)
+	// TLS Test with user name only
+	if m.RecordFailure(ip, "Telnet", tlsUsername, "") {
+		t.Fatal("TLS scan attempt with empty password must not trigger a report")
 	}
 	f.expectNone(t)
 
@@ -299,15 +315,15 @@ func TestRecordFailure_HTTPRequestLineDoesNotCountTowardsThreshold(t *testing.T)
 }
 
 // Only the exact request line is exempt: other usernames that merely look similar still count.
-func TestRecordFailure_OtherHTTPLikeUsernamesStillCount(t *testing.T) {
-	f := newFake("A")
-	m := newTestManager(1, f)
+// func TestRecordFailure_OtherHTTPLikeUsernamesStillCount(t *testing.T) {
+// 	f := newFake("A")
+// 	m := newTestManager(1, f)
 
-	if !m.RecordFailure("192.0.2.27", "SSH", "GET /admin HTTP/1.1", "Host: 198.51.100.7:2222") {
-		t.Fatal("a different request line is treated as an ordinary username")
-	}
-	f.next(t)
-}
+// 	if !m.RecordFailure("192.0.2.27", "SSH", "GET /admin HTTP/1.1", "Host: 198.51.100.7:2222") {
+// 		t.Fatal("a different request line is treated as an ordinary username")
+// 	}
+// 	f.next(t)
+// }
 
 // keyFake is a backend that publishes public keys.
 type keyFake struct{ *fakeBackend }
