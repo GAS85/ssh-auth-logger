@@ -1115,7 +1115,7 @@ func main() {
 		if err != nil {
 			logrus.WithError(err).Fatal("Cannot start statistics endpoint (STATS_BIND)")
 		}
-		logrus.WithField("address", addr.String()).Info("Statistics endpoint listening on /stats")
+		logrus.WithField("address", addr.String()).Debug("Statistics endpoint listening on /stats")
 	}
 
 	// SSH listener
