@@ -309,6 +309,7 @@ func (m *Manager) record(ip, protocol, username, password, publicKey string) boo
 
 	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
 	if !state.lastReported.IsZero() && now.Sub(state.lastReported) < m.reportEvery {
+		logger.WithField("ip", ip).Debug("IP has already been reported and is in cooldown period")
 		m.mu.Unlock()
 		return false
 	}
