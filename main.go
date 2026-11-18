@@ -258,9 +258,22 @@ func handleTelnetConnection(conn net.Conn) {
 	fields["protocol"] = "telnet"
 
 	stats.TelnetPasswords.Add(1)
+
+	// Prepare message based on a port scan condition. Remove trash from the logs
+	message := "Telnet login attempt"
+	if abuse.IsHttpProtocolProbe(username) {
+		message = "HTTP Ports scan detected: " + username + "; " + loggedPassword.(string)
+		delete(fields, "duser")
+		delete(fields, "password")
+	}
+	if abuse.IsHttpsProtocolProbe(username) {
+		message = "HTTPS Ports scan detected"
+		delete(fields, "duser")
+		delete(fields, "password")
+	}
 	logger.WithFields(fields).
 		WithField("destinationServicename", "telnetd").
-		Log(attemptLogLevel(src), "Telnet login attempt")
+		Log(attemptLogLevel(src), message)
 
 	// AbuseIPDB reporting
 	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())

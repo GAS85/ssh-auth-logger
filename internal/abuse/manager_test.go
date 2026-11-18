@@ -364,14 +364,32 @@ func TestRecordFailure_ProbesDuringCooldownAreNotRetained(t *testing.T) {
 	}
 }
 
-func TestIsProtocolProbe(t *testing.T) {
+func TestIsHttpProtocolProbe(t *testing.T) {
 	for in, want := range map[string]bool{
 		"GET / HTTP/1.1": true, "GET /admin": true, "GET /": true,
+		"PUT / HTTP/1.1": true, "PUT /admin": true, "PUT /": true,
+		"POST / HTTP/1.1": true, "POST /admin": true, "POST /": true,
+		"DELETE / HTTP/1.1": true, "DELETE /admin": true, "DELETE /": true,
+		"PATCH / HTTP/1.1": true, "PATCH /admin": true, "PATCH /": true,
+		"OPTIONS / HTTP/1.1": true, "OPTIONS /admin": true, "OPTIONS /": true,
+
+		"\x16\x03\x01\x00": false, "\x16\x03": false,
+		"": false, "root": false, "GET": false, "get /": false, "\x16": false, "xGET /": false,
+	} {
+		if got := IsHttpProtocolProbe(in); got != want {
+			t.Errorf("IsHttpProtocolProbe(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestHttpsIsProtocolProbe(t *testing.T) {
+	for in, want := range map[string]bool{
+		"GET / HTTP/1.1": false, "GET /admin": false, "GET /": false,
 		"\x16\x03\x01\x00": true, "\x16\x03": true,
 		"": false, "root": false, "GET": false, "get /": false, "POST / HTTP/1.1": false, "\x16": false, "xGET /": false,
 	} {
-		if got := isProtocolProbe(in); got != want {
-			t.Errorf("isProtocolProbe(%q) = %v, want %v", in, got, want)
+		if got := IsHttpsProtocolProbe(in); got != want {
+			t.Errorf("IsHttpsProtocolProbe(%q) = %v, want %v", in, got, want)
 		}
 	}
 }
