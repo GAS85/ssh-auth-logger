@@ -264,7 +264,7 @@ function classify(event) {
   let type = "other";
   if (isReport) type = "report";
   else if (msg.includes("dropped")) type = "dropped";
-  else if (msg.includes("port scan detected")) type = "portscan";
+  else if (msg.includes("ports scan detected")) type = "portscan";
   else if (msg.includes("connection")) type = "connection";
   else if (msg.includes("password") || msg.includes("login attempt"))
     type = "password";
