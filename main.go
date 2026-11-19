@@ -296,14 +296,39 @@ func handleTelnetConnection(conn net.Conn) {
 // port-scan probe rather than a real credential attempt.
 func classifyTelnetAttempt(username, loggedPassword string) (message string, scan bool) {
 	switch {
-	case abuse.IsHttpProtocolProbe(username):
+	case isHttpProtocolProbe(username):
 		return "Ports scan detected - HTTP: " + username + "; " + loggedPassword, true
-	case abuse.IsHttpsProtocolProbe(username):
+	case isHttpsProtocolProbe(username):
 		return "Ports scan detected - HTTPS", true
 	case username == "" && loggedPassword == "":
 		return "Ports scan detected - empty credentials", true
 	}
 	return "Telnet login attempt", false
+}
+
+var httpMethods = []string{
+	"GET /",
+	"POST /",
+	"PUT /",
+	"DELETE /",
+	"PATCH /",
+	"HEAD /",
+	"OPTIONS /",
+}
+
+// isHttpProtocolProbe reports whether username is really the first bytes of another protocol sent to the SSH/Telnet port: an HTTP request line ("GET / HTTP/1.1", the "password" is then the Host header)
+func isHttpProtocolProbe(username string) bool {
+	for _, method := range httpMethods {
+		if strings.HasPrefix(username, method) {
+			return true
+		}
+	}
+	return false
+}
+
+// ...or the start of a TLS handshake (record header 0x16 0x03).
+func isHttpsProtocolProbe(username string) bool {
+	return strings.HasPrefix(username, "\x16\x03")
 }
 
 // readLine reads one line from conn. It gives up after telnetReadDeadline in total and keeps at most

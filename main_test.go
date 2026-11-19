@@ -1780,20 +1780,50 @@ func TestAbuse_NilReporterDoesNotBreakHandlers(t *testing.T) {
 // Fixtures for the port-scan classification in handleTelnetConnection.
 // The preconditions below check them against the real detectors, so if the detectors change, the failure points here and not at a confusing message mismatch.
 func TestTelnetScan_FixturesMatchDetectors(t *testing.T) {
-	if !abuse.IsHttpProtocolProbe(httpProbeUser) {
-		t.Fatalf("fixture %q is not detected by abuse.IsHttpProtocolProbe: adjust httpProbeUser", httpProbeUser)
+	if !isHttpProtocolProbe(httpProbeUser) {
+		t.Fatalf("fixture %q is not detected by isHttpProtocolProbe: adjust httpProbeUser", httpProbeUser)
 	}
-	if abuse.IsHttpsProtocolProbe(httpProbeUser) {
+	if isHttpsProtocolProbe(httpProbeUser) {
 		t.Fatalf("HTTP fixture must not be detected as HTTPS")
 	}
-	if !abuse.IsHttpsProtocolProbe(httpsProbeUser) {
-		t.Fatalf("fixture %q is not detected by abuse.IsHttpsProtocolProbe: adjust httpsProbeUser", httpsProbeUser)
+	if !isHttpsProtocolProbe(httpsProbeUser) {
+		t.Fatalf("fixture %q is not detected by isHttpsProtocolProbe: adjust httpsProbeUser", httpsProbeUser)
 	}
-	if abuse.IsHttpProtocolProbe(httpsProbeUser) {
+	if isHttpProtocolProbe(httpsProbeUser) {
 		t.Fatalf("HTTPS fixture must not be detected as HTTP")
 	}
-	if abuse.IsHttpProtocolProbe("admin") || abuse.IsHttpsProtocolProbe("admin") || abuse.IsHttpProtocolProbe("") || abuse.IsHttpsProtocolProbe("") {
+	if isHttpProtocolProbe("admin") || isHttpsProtocolProbe("admin") || isHttpProtocolProbe("") || isHttpsProtocolProbe("") {
 		t.Fatal("ordinary or empty usernames must not be detected as probes")
+	}
+}
+
+func TestIsHttpProtocolProbe(t *testing.T) {
+	for in, want := range map[string]bool{
+		"GET / HTTP/1.1": true, "GET /admin": true, "GET /": true,
+		"PUT / HTTP/1.1": true, "PUT /admin": true, "PUT /": true,
+		"POST / HTTP/1.1": true, "POST /admin": true, "POST /": true,
+		"DELETE / HTTP/1.1": true, "DELETE /admin": true, "DELETE /": true,
+		"PATCH / HTTP/1.1": true, "PATCH /admin": true, "PATCH /": true,
+		"OPTIONS / HTTP/1.1": true, "OPTIONS /admin": true, "OPTIONS /": true,
+
+		"\x16\x03\x01\x00": false, "\x16\x03": false,
+		"": false, "root": false, "GET": false, "get /": false, "\x16": false, "xGET /": false,
+	} {
+		if got := isHttpProtocolProbe(in); got != want {
+			t.Errorf("isHttpProtocolProbe(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestHttpsIsProtocolProbe(t *testing.T) {
+	for in, want := range map[string]bool{
+		"GET / HTTP/1.1": false, "GET /admin": false, "GET /": false,
+		"\x16\x03\x01\x00": true, "\x16\x03": true,
+		"": false, "root": false, "GET": false, "get /": false, "POST / HTTP/1.1": false, "\x16": false, "xGET /": false,
+	} {
+		if got := isHttpsProtocolProbe(in); got != want {
+			t.Errorf("isHttpsProtocolProbe(%q) = %v, want %v", in, got, want)
+		}
 	}
 }
 

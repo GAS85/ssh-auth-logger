@@ -279,12 +279,6 @@ func (m *Manager) record(ip, protocol, username, password, publicKey string) boo
 		return false
 	}
 
-	// A protocol probe (HTTP request line or TLS handshake sent to the SSH/Telnet port) is not a login attempt. It is dropped here, before any state is touched, so it neither counts towards the threshold nor is remembered: otherwise it would be handed to every backend (AbuseIPDB, OTX, DShield, ...) as a username/password the next time the IP is reported.
-	if IsHttpProtocolProbe(username) || IsHttpsProtocolProbe(username) {
-		logger.WithField("ip", ip).Debug("Port scan detected, will not report it")
-		return false
-	}
-
 	now := time.Now()
 
 	m.mu.Lock()
@@ -551,22 +545,6 @@ func (m *Manager) cleanupReputation(now time.Time) {
 			"remaining": len(m.rep),
 		}).Debug("Abuse: expired IP reputation entries purged")
 	}
-}
-
-// IsHttpProtocolProbe reports whether username is really the first bytes of another protocol sent to the SSH/Telnet port: an HTTP request line ("GET / HTTP/1.1", the "password" is then the Host header)
-func IsHttpProtocolProbe(username string) bool {
-	return strings.HasPrefix(username, "GET /") ||
-		strings.HasPrefix(username, "POST /") ||
-		strings.HasPrefix(username, "PUT /") ||
-		strings.HasPrefix(username, "DELETE /") ||
-		strings.HasPrefix(username, "PATCH /") ||
-		strings.HasPrefix(username, "HEAD /") ||
-		strings.HasPrefix(username, "OPTIONS /")
-}
-
-// ...or the start of a TLS handshake (record header 0x16 0x03).
-func IsHttpsProtocolProbe(username string) bool {
-	return strings.HasPrefix(username, "\x16\x03")
 }
 
 // addCredential appends c unless the same username/password pair is already present or the per-window cap has been reached.
