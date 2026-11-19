@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net"
 	"os"
@@ -33,6 +34,10 @@ const (
 
 	// shutdownFlushTimeout bounds how long SIGTERM/SIGINT waits for batching abuse backends to send their queue. It stays below the 10s that Docker and systemd give a container or service before killing it.
 	shutdownFlushTimeout = 8 * time.Second
+
+	// Limits for reading a telnet line from an untrusted client.
+	// A client can stream bytes with no newline and grow result without limit, and idle connections hold a goroutine forever.
+	maxTelnetLineLen = 1024
 )
 
 var (
@@ -59,6 +64,8 @@ var (
 
 	hostKeyCacheTTL     time.Duration
 	hostKeyCacheCleanup time.Duration
+
+	telnetReadDeadline = 30 * time.Second // variable so tests can shorten it
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -258,44 +265,49 @@ func handleTelnetConnection(conn net.Conn) {
 	fields["password"] = loggedPassword
 	fields["protocol"] = "telnet"
 
-	stats.TelnetPasswords.Add(1)
-
-	// Prepare message based on a port scan condition. Remove trash from the logs
-	message := "Telnet login attempt"
-	if abuse.IsHttpProtocolProbe(username) {
-		message = "Port scan detected - HTTP: " + username + "; " + loggedPassword.(string)
+	// Port-scan probes (HTTP/HTTPS requests, empty credentials) are not password attempts: they are
+	// neither counted in the statistics nor reported to the abuse backends. Remove trash from the logs.
+	message, isScan := classifyTelnetAttempt(username, loggedPassword.(string))
+	if isScan {
 		delete(fields, "duser")
 		delete(fields, "password")
-	} else if abuse.IsHttpsProtocolProbe(username) {
-		message = "Port scan detected - HTTPS"
-		delete(fields, "duser")
-		delete(fields, "password")
-	} else if username == "" && loggedPassword.(string) == "" {
-		message = "Port scan detected - empty credentials"
-		delete(fields, "duser")
-		delete(fields, "password")
+	} else {
+		stats.TelnetPasswords.Add(1)
 	}
 	logger.WithFields(fields).
 		WithField("destinationServicename", "telnetd").
 		Log(attemptLogLevel(src), message)
 
-	// Abuse reporting
+	// Abuse reporting (real login attempts only)
+	if !isScan {
 	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 	if err == nil && reportableIP(ip) {
-		abuseReporter.RecordFailure(
-			ip,
-			"Telnet",
-			string(username),
-			string(password),
-		)
+			abuseReporter.RecordFailure(ip, "Telnet", username, password)
+		}
 	}
 
 	time.Sleep(2 * time.Second)
 	limitedConn.Write([]byte("\r\nLogin incorrect\r\n"))
 }
 
-// Simple Telnet Parser
+// classifyTelnetAttempt returns the log message for a telnet login attempt and whether it is a
+// port-scan probe rather than a real credential attempt.
+func classifyTelnetAttempt(username, loggedPassword string) (message string, scan bool) {
+	switch {
+	case abuse.IsHttpProtocolProbe(username):
+		return "Ports scan detected - HTTP: " + username + "; " + loggedPassword, true
+	case abuse.IsHttpsProtocolProbe(username):
+		return "Ports scan detected - HTTPS", true
+	case username == "" && loggedPassword == "":
+		return "Ports scan detected - empty credentials", true
+	}
+	return "Telnet login attempt", false
+}
+
+// readLine reads one line from conn. It gives up after telnetReadDeadline in total and keeps at most
+// maxTelnetLineLen bytes; the rest of an overlong line is read and discarded, so memory stays bounded.
 func readLine(conn net.Conn) (string, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(telnetReadDeadline))
 	buf := make([]byte, 1)
 	var result []byte
 
@@ -316,16 +328,18 @@ func readLine(conn net.Conn) (string, error) {
 		}
 
 		// Ignore CR
-		if buf[0] == '\r' {
+		if b == '\r' {
 			continue
 		}
 
 		// End on LF
-		if buf[0] == '\n' {
+		if b == '\n' {
 			break
 		}
 
-		result = append(result, buf[0])
+		if len(result) < maxTelnetLineLen {
+			result = append(result, b)
+		}
 	}
 
 	return strings.TrimSpace(string(result)), nil
