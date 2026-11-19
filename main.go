@@ -65,7 +65,9 @@ var (
 	hostKeyCacheTTL     time.Duration
 	hostKeyCacheCleanup time.Duration
 
-	telnetReadDeadline = 30 * time.Second // variable so tests can shorten it
+	// readLine now stops after telnetReadDeadline seconds in total.
+	// Variable so tests can shorten it
+	telnetReadDeadline = 30 * time.Second
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -280,8 +282,8 @@ func handleTelnetConnection(conn net.Conn) {
 
 	// Abuse reporting (real login attempts only)
 	if !isScan {
-	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
-	if err == nil && reportableIP(ip) {
+		ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+		if err == nil && reportableIP(ip) {
 			abuseReporter.RecordFailure(ip, "Telnet", username, password)
 		}
 	}

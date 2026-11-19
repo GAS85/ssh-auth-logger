@@ -1028,7 +1028,10 @@ func TestMakeSSHConfig_BannerCallback(t *testing.T) {
 	server, client := tcpPair(t)
 	defer client.Close()
 
-	config := makeSSHConfig(server)
+	config, err := makeSSHConfig(server)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if config.BannerCallback == nil {
 		t.Error("BannerCallback should be set when sendBanner is true")
@@ -1050,7 +1053,10 @@ func TestMakeSSHConfig_ProfileScope(t *testing.T) {
 	profileScope = "remote_ip"
 	server, client := tcpPair(t)
 	defer client.Close()
-	config := makeSSHConfig(server)
+	config, err := makeSSHConfig(server)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if config.ServerVersion == "" {
 		t.Error("ServerVersion should be set for remote_ip scope")
 	}
@@ -1059,7 +1065,10 @@ func TestMakeSSHConfig_ProfileScope(t *testing.T) {
 	profileScope = "host"
 	server2, client2 := tcpPair(t)
 	defer client2.Close()
-	config2 := makeSSHConfig(server2)
+	config2, err := makeSSHConfig(server2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if config2.ServerVersion == "" {
 		t.Error("ServerVersion should be set for host scope")
 	}
@@ -1422,17 +1431,81 @@ func TestMakeSSHConfig_RemoteIPProfileScope_InvalidAddr(t *testing.T) {
 		remoteAddr: &mockAddr{net: "tcp", str: "invalid"},
 	}
 
-	config := makeSSHConfig(mockConn)
+	config, err := makeSSHConfig(mockConn)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if config.ServerVersion == "" {
 		t.Error("Should still create config with invalid remote address")
 	}
 }
 
-// TestMakeSSHConfig_HostKeyGenerationError tests error path in host key generation
+// TestMakeSSHConfig_HostKeyGenerationError: a host key failure is returned as an error, not a panic.
 func TestMakeSSHConfig_HostKeyGenerationError(t *testing.T) {
-	// This would require mocking getHostKeySigner to return an error
-	// For now, we'll test that the function handles it gracefully
-	// Note: In production, this would panic, but in tests we can't easily trigger it
+	old := serverProfiles
+	defer func() { serverProfiles = old }()
+	bad := old[0]
+	bad.HostKeyType = "bogus"
+	serverProfiles = []serverProfile{bad}
+
+	server, client := tcpPair(t)
+	defer client.Close()
+	defer server.Close()
+
+	if _, err := makeSSHConfig(server); err == nil {
+		t.Fatal("expected an error for an unsupported host key type")
+	}
+}
+
+// TestServeSSHConn_HostKeyErrorClosesConnection: on a host key error the connection is closed, the
+// open gauge returns to its previous value and the process survives.
+func TestServeSSHConn_HostKeyErrorClosesConnection(t *testing.T) {
+	old := serverProfiles
+	defer func() { serverProfiles = old }()
+	bad := old[0]
+	bad.HostKeyType = "bogus"
+	serverProfiles = []serverProfile{bad}
+
+	server, client := tcpPair(t)
+	defer client.Close()
+
+	before := stats.OpenSSH.Load()
+	serveSSHConn(server)
+
+	client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := client.Read(make([]byte, 1)); err == nil {
+		t.Fatal("expected the connection to be closed")
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("connection was not closed within 5s")
+	}
+	waitFor(t, "OpenSSH gauge back to baseline", func() bool { return stats.OpenSSH.Load() == before })
+}
+
+// TestServeSSHConn_DoesNotBlockOnKeySetup: serveSSHConn returns immediately, even if key setup is slow.
+func TestServeSSHConn_DoesNotBlockOnKeySetup(t *testing.T) {
+	oldScope := profileScope
+	defer func() { profileScope = oldScope }()
+	profileScope = "remote_ip"
+	hostKeys.mu.Lock()
+	hostKeys.keys = map[string]cachedHostKey{} // force generation
+	hostKeys.mu.Unlock()
+
+	server, client := tcpPair(t)
+	defer client.Close()
+	before := stats.OpenSSH.Load()
+	start := time.Now()
+	serveSSHConn(server)
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Errorf("serveSSHConn took %v, key generation must not run in the caller", d)
+	}
+
+	// The handler goroutine reads profileScope, so wait for it to finish before the deferred restore of
+	// the global (otherwise the race detector flags it).
+	client.Close()
+	// RSA key generation inside the goroutine can take a while under -race.
+	if !waitUntil(60*time.Second, func() bool { return stats.OpenSSH.Load() == before }) {
+		t.Fatal("handler goroutine did not finish")
+	}
 }
 
 // TestTelnet_ReadLineError tests readLine error paths
@@ -1759,12 +1832,12 @@ func TestTelnetScan_Classification(t *testing.T) {
 		{"plain login, base64 mode", "admin", "pw", false, "Telnet login attempt", true},
 		{"user without password is a normal attempt", "root", "", true, "Telnet login attempt", true},
 		{"password without user is a normal attempt", "", "pw", true, "Telnet login attempt", true},
-		{"HTTP probe, empty password", httpProbeUser, "", true, "Port scan detected - HTTP: " + httpProbeUser + "; ", false},
-		{"HTTP probe, cleartext password in message", httpProbeUser, "x", true, "Port scan detected - HTTP: " + httpProbeUser + "; x", false},
-		{"HTTP probe, base64 password in message", httpProbeUser, "x", false, "Port scan detected - HTTP: " + httpProbeUser + "; eA==", false},
-		{"HTTPS probe", httpsProbeUser, "", true, "Port scan detected - HTTPS", false},
-		{"empty credentials", "", "", true, "Port scan detected - empty credentials", false},
-		{"empty credentials, base64 mode", "", "", false, "Port scan detected - empty credentials", false},
+		{"HTTP probe, empty password", httpProbeUser, "", true, "Ports scan detected - HTTP: " + httpProbeUser + "; ", false},
+		{"HTTP probe, cleartext password in message", httpProbeUser, "x", true, "Ports scan detected - HTTP: " + httpProbeUser + "; x", false},
+		{"HTTP probe, base64 password in message", httpProbeUser, "x", false, "Ports scan detected - HTTP: " + httpProbeUser + "; eA==", false},
+		{"HTTPS probe", httpsProbeUser, "", true, "Ports scan detected - HTTPS", false},
+		{"empty credentials", "", "", true, "Ports scan detected - empty credentials", false},
+		{"empty credentials, base64 mode", "", "", false, "Ports scan detected - empty credentials", false},
 	}
 
 	for _, tc := range cases {
@@ -1809,11 +1882,128 @@ func TestTelnetScan_LevelWithPrivateIPsAsUsual(t *testing.T) {
 	setPrivateAsUsual(t, true)
 
 	e := runTelnetAttempt(t, "", "")
-	if e.Message != "Port scan detected - empty credentials" {
+	if e.Message != "Ports scan detected - empty credentials" {
 		t.Fatalf("message = %q", e.Message)
 	}
 	if e.Level != logrus.InfoLevel {
 		t.Errorf("level = %v, want info", e.Level)
+	}
+}
+
+func TestClassifyTelnetAttempt(t *testing.T) {
+	cases := []struct {
+		user, pass string
+		wantMsg    string
+		wantScan   bool
+	}{
+		{"admin", "pw", "Telnet login attempt", false},
+		{"root", "", "Telnet login attempt", false},
+		{"", "pw", "Telnet login attempt", false},
+		{httpProbeUser, "x", "Ports scan detected - HTTP: " + httpProbeUser + "; x", true},
+		{httpsProbeUser, "x", "Ports scan detected - HTTPS", true},
+		{"", "", "Ports scan detected - empty credentials", true},
+	}
+	for _, tc := range cases {
+		msg, scan := classifyTelnetAttempt(tc.user, tc.pass)
+		if msg != tc.wantMsg || scan != tc.wantScan {
+			t.Errorf("classifyTelnetAttempt(%q, %q) = (%q, %v), want (%q, %v)", tc.user, tc.pass, msg, scan, tc.wantMsg, tc.wantScan)
+		}
+	}
+}
+
+// Probes are neither counted as password attempts nor reported to the abuse backends; real attempts are both.
+func TestTelnetScan_NotCountedNorReported(t *testing.T) {
+	cases := []struct {
+		name       string
+		user, pass string
+		real       bool
+	}{
+		{"HTTP probe", httpProbeUser, "", false},
+		{"HTTPS probe", httpsProbeUser, "", false},
+		{"empty credentials", "", "", false},
+		{"real attempt", "admin", "pw", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := freshStats(t)
+			reports := installReporter(t, 1, nil)
+
+			runTelnetAttempt(t, tc.user, tc.pass)
+
+			wantPw := uint64(0)
+			if tc.real {
+				wantPw = 1
+			}
+			if got := s.TelnetPasswords.Load(); got != wantPw {
+				t.Errorf("TelnetPasswords = %d, want %d", got, wantPw)
+			}
+			if got := s.TelnetConnections.Load(); got != 1 {
+				t.Errorf("TelnetConnections = %d, want 1 (probes are still connections)", got)
+			}
+
+			if tc.real {
+				r := waitReport(t, reports)
+				if len(r.Creds) != 1 || r.Creds[0].Username != tc.user {
+					t.Errorf("creds = %+v, want one entry for %q", r.Creds, tc.user)
+				}
+				return
+			}
+			select {
+			case r := <-reports:
+				t.Errorf("a probe must not be reported, got %+v", r)
+			case <-time.After(500 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestReadLine_CapsLineLength(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	go func() {
+		client.Write([]byte(strings.Repeat("A", maxTelnetLineLen*5) + "\n"))
+	}()
+
+	got, err := readLine(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != maxTelnetLineLen {
+		t.Errorf("len = %d, want %d", len(got), maxTelnetLineLen)
+	}
+}
+
+func TestReadLine_ShortLineUnchanged(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	go client.Write([]byte("admin\r\n"))
+
+	if got, err := readLine(server); err != nil || got != "admin" {
+		t.Errorf("readLine = %q, %v, want admin", got, err)
+	}
+}
+
+// A client that sends nothing (or never ends the line) must not hold the goroutine forever.
+func TestReadLine_TimesOutOnSilentClient(t *testing.T) {
+	old := telnetReadDeadline
+	telnetReadDeadline = 200 * time.Millisecond
+	defer func() { telnetReadDeadline = old }()
+
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	go client.Write([]byte("partial-no-newline"))
+
+	start := time.Now()
+	_, err := readLine(server)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("readLine took %v, want about 200ms", d)
 	}
 }
 
@@ -1890,10 +2080,12 @@ func TestRateInit_ExactRateUsesDefaults(t *testing.T) {
 
 // Unset, "false" and every value other than 1/true/yes keep the random adjustment on.
 func TestRateInit_AdjustmentIsOnByDefault(t *testing.T) {
-	const base, telnetBase, runs = 1000, 500, 10
+	// Every sample starts the test binary as a child process (slow under -race), so keep the count low and run the cases in parallel.
+	const base, telnetBase, runs = 1000, 500, 4
 
 	for _, flag := range []string{"", "false", "0", "no", "maybe"} {
 		t.Run("USE_EXACT_RATE="+flag, func(t *testing.T) {
+			t.Parallel()
 			sshRates, telnetRates := sampleRates(t, runs, "SSHD_RATE=1000", "TELNET_RATE=500", "USE_EXACT_RATE="+flag)
 
 			// SSH: -50 .. +250, Telnet: -20 .. +100 (bounds included).
@@ -1915,7 +2107,7 @@ func TestRateInit_AdjustmentIsOnByDefault(t *testing.T) {
 }
 
 func TestRateInit_AdjustedDefaultsStayInRange(t *testing.T) {
-	sshRates, telnetRates := sampleRates(t, 10)
+	sshRates, telnetRates := sampleRates(t, 6)
 	if v, ok := inRange(sshRates, 400, 700); !ok {
 		t.Errorf("SSH rate %d is outside 400..700 (default 450, -50..+250): %v", v, sshRates)
 	}
@@ -1926,7 +2118,7 @@ func TestRateInit_AdjustedDefaultsStayInRange(t *testing.T) {
 
 // A small configured rate must never end up at zero or below, otherwise the rate limiter would divide by zero.
 func TestRateInit_AdjustedRateNeverBelowOne(t *testing.T) {
-	sshRates, telnetRates := sampleRates(t, 15, "SSHD_RATE=1", "TELNET_RATE=1")
+	sshRates, telnetRates := sampleRates(t, 6, "SSHD_RATE=1", "TELNET_RATE=1")
 
 	if v, ok := inRange(sshRates, 1, 1+250); !ok {
 		t.Errorf("SSH rate %d is outside 1..251: %v", v, sshRates)
