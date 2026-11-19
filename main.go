@@ -1010,7 +1010,9 @@ func init() {
 
 	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
 
-	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", "Take me to your leader") // This is legacy, could we generate it randomly on start?
+	// Host keys are predictable for anyone running defaults. That makes the honeypot fingerprintable.
+	// Generate random seed if nothing provided
+	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", fmt.Sprintf("%016x%016x", rand.Uint64(), rand.Uint64()))
 
 	rateStr := getEnvWithDefault("SSHD_RATE", "450") // default rate is 450 bytes per second very slow...
 	rate, err = strconv.Atoi(rateStr)
