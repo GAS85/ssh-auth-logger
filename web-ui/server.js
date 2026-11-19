@@ -264,8 +264,8 @@ function classify(event) {
   let type = "other";
   if (isReport) type = "report";
   else if (msg.includes("dropped")) type = "dropped";
-  else if (msg.includes("connection") || msg.includes("Port scan detected"))
-    type = "connection";
+  else if (msg.includes("port scan detected")) type = "portscan";
+  else if (msg.includes("connection")) type = "connection";
   else if (msg.includes("password") || msg.includes("login attempt"))
     type = "password";
   else if (msg.includes("request with key") || event.fingerprint) type = "key";
@@ -375,6 +375,7 @@ async function buildDashboard() {
       passwords: 0,
       keys: 0,
       dropped: 0,
+      portscans: 0,
       current: i === WINDOW_MINUTES - 1,
       complete: !(truncated && startMs < oldest),
     };
@@ -392,6 +393,7 @@ async function buildDashboard() {
     if (e.type === "password") b.passwords++;
     if (e.type === "key") b.keys++;
     if (e.type === "dropped") b.dropped++;
+    if (e.type === "portscan") b.portscans++;
   }
 
   const countryCounts = {};
