@@ -15,6 +15,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// Fixtures for the port-scan classification in handleTelnetConnection.
+// The preconditions below check them against the real detectors, so if the detectors change, the failure points here and not at a confusing message mismatch.
+const (
+	httpProbeUser  = "GET / HTTP/1.1"
+	httpsProbeUser = "\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03" // start of a TLS ClientHello
+)
+
 // TestMain runs before all tests, overriding slow/awkward defaults set by init().
 func TestMain(m *testing.M) {
 	rsaBits = 2048          // init() sets 3072; 2048 is fast enough for tests
@@ -1118,60 +1125,60 @@ func TestGetServerProfile_NegativeSeed(t *testing.T) {
 }
 
 // TestTelnet_EmptyLoginSequence tests telnet with empty credentials
-func TestTelnet_EmptyLoginSequence(t *testing.T) {
-	hook := &logHook{}
-	logrus.AddHook(hook)
-	defer func() { logrus.StandardLogger().ReplaceHooks(logrus.LevelHooks{}) }()
+// func TestTelnet_EmptyLoginSequence(t *testing.T) {
+// 	hook := &logHook{}
+// 	logrus.AddHook(hook)
+// 	defer func() { logrus.StandardLogger().ReplaceHooks(logrus.LevelHooks{}) }()
 
-	addr := startTelnetServer(t)
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
+// 	addr := startTelnetServer(t)
+// 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer conn.Close()
 
-	buf := make([]byte, 512)
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+// 	buf := make([]byte, 512)
+// 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	// Read until login prompt
-	var prompt string
-	for !strings.Contains(prompt, "login:") {
-		n, _ := conn.Read(buf)
-		prompt += string(buf[:n])
-	}
+// 	// Read until login prompt
+// 	var prompt string
+// 	for !strings.Contains(prompt, "login:") {
+// 		n, _ := conn.Read(buf)
+// 		prompt += string(buf[:n])
+// 	}
 
-	// Send empty username (just newline)
-	conn.Write([]byte("\n"))
+// 	// Send empty username (just newline)
+// 	conn.Write([]byte("\n"))
 
-	// Read password prompt
-	conn.Read(buf)
+// 	// Read password prompt
+// 	conn.Read(buf)
 
-	// Send empty password
-	conn.Write([]byte("\n"))
+// 	// Send empty password
+// 	conn.Write([]byte("\n"))
 
-	// Read response
-	var response string
-	for !strings.Contains(response, "incorrect") {
-		n, err := conn.Read(buf)
-		if err != nil {
-			break
-		}
-		response += string(buf[:n])
-	}
+// 	// Read response
+// 	var response string
+// 	for !strings.Contains(response, "incorrect") {
+// 		n, err := conn.Read(buf)
+// 		if err != nil {
+// 			break
+// 		}
+// 		response += string(buf[:n])
+// 	}
 
-	time.Sleep(100 * time.Millisecond)
+// 	time.Sleep(100 * time.Millisecond)
 
-	// Check logs
-	var foundEmptyUser bool
-	for _, e := range hook.Entries {
-		if user, ok := e.Data["duser"]; ok && user == "" {
-			foundEmptyUser = true
-		}
-	}
-	if !foundEmptyUser {
-		t.Log("Empty username login may not have been logged")
-	}
-}
+// 	// Check logs
+// 	var foundEmptyUser bool
+// 	for _, e := range hook.Entries {
+// 		if user, ok := e.Data["duser"]; ok && user == "" {
+// 			foundEmptyUser = true
+// 		}
+// 	}
+// 	if !foundEmptyUser {
+// 		t.Log("Empty username login may not have been logged")
+// 	}
+// }
 
 // TestTelnet_BannerReplacement tests telnet banner text replacement
 func TestTelnet_BannerReplacement(t *testing.T) {
@@ -1694,5 +1701,275 @@ func TestAbuse_NilReporterDoesNotBreakHandlers(t *testing.T) {
 	addr := startTelnetServer(t)
 	if resp := doTelnetLogin(t, addr, "u", "p"); !strings.Contains(resp, "incorrect") {
 		t.Errorf("handler must still answer when no reporter is configured, got %q", resp)
+	}
+}
+
+// Fixtures for the port-scan classification in handleTelnetConnection.
+// The preconditions below check them against the real detectors, so if the detectors change, the failure points here and not at a confusing message mismatch.
+func TestTelnetScan_FixturesMatchDetectors(t *testing.T) {
+	if !abuse.IsHttpProtocolProbe(httpProbeUser) {
+		t.Fatalf("fixture %q is not detected by abuse.IsHttpProtocolProbe: adjust httpProbeUser", httpProbeUser)
+	}
+	if abuse.IsHttpsProtocolProbe(httpProbeUser) {
+		t.Fatalf("HTTP fixture must not be detected as HTTPS")
+	}
+	if !abuse.IsHttpsProtocolProbe(httpsProbeUser) {
+		t.Fatalf("fixture %q is not detected by abuse.IsHttpsProtocolProbe: adjust httpsProbeUser", httpsProbeUser)
+	}
+	if abuse.IsHttpProtocolProbe(httpsProbeUser) {
+		t.Fatalf("HTTPS fixture must not be detected as HTTP")
+	}
+	if abuse.IsHttpProtocolProbe("admin") || abuse.IsHttpsProtocolProbe("admin") || abuse.IsHttpProtocolProbe("") || abuse.IsHttpsProtocolProbe("") {
+		t.Fatal("ordinary or empty usernames must not be detected as probes")
+	}
+}
+
+// runTelnetAttempt does one full telnet login and returns the "attempt" log entry (the one carrying protocol=telnet).
+func runTelnetAttempt(t *testing.T, user, pass string) *logrus.Entry {
+	t.Helper()
+
+	hook := &logHook{}
+	logrus.AddHook(hook)
+	t.Cleanup(func() { logrus.StandardLogger().ReplaceHooks(logrus.LevelHooks{}) })
+
+	resp := doTelnetLogin(t, startTelnetServer(t), user, pass)
+	if !strings.Contains(resp, "incorrect") {
+		t.Errorf("the handler must answer every attempt with 'Login incorrect', got %q", resp)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	for _, e := range hook.Entries {
+		if e.Data["protocol"] == "telnet" {
+			return e
+		}
+	}
+	t.Fatalf("no telnet login attempt was logged for user %q", user)
+	return nil
+}
+
+func TestTelnetScan_Classification(t *testing.T) {
+	cases := []struct {
+		name       string
+		user, pass string
+		clearPass  bool
+		wantMsg    string
+		wantFields bool // duser and password are kept in the entry
+	}{
+		{"plain login", "admin", "pw", true, "Telnet login attempt", true},
+		{"plain login, base64 mode", "admin", "pw", false, "Telnet login attempt", true},
+		{"user without password is a normal attempt", "root", "", true, "Telnet login attempt", true},
+		{"password without user is a normal attempt", "", "pw", true, "Telnet login attempt", true},
+		{"HTTP probe, empty password", httpProbeUser, "", true, "Port scan detected - HTTP: " + httpProbeUser + "; ", false},
+		{"HTTP probe, cleartext password in message", httpProbeUser, "x", true, "Port scan detected - HTTP: " + httpProbeUser + "; x", false},
+		{"HTTP probe, base64 password in message", httpProbeUser, "x", false, "Port scan detected - HTTP: " + httpProbeUser + "; eA==", false},
+		{"HTTPS probe", httpsProbeUser, "", true, "Port scan detected - HTTPS", false},
+		{"empty credentials", "", "", true, "Port scan detected - empty credentials", false},
+		{"empty credentials, base64 mode", "", "", false, "Port scan detected - empty credentials", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			old := telnetLogClearPassword
+			telnetLogClearPassword = tc.clearPass
+			t.Cleanup(func() { telnetLogClearPassword = old })
+			setPrivateAsUsual(t, false)
+
+			e := runTelnetAttempt(t, tc.user, tc.pass)
+
+			if e.Message != tc.wantMsg {
+				t.Errorf("message = %q, want %q", e.Message, tc.wantMsg)
+			}
+
+			_, hasUser := e.Data["duser"]
+			_, hasPass := e.Data["password"]
+			if hasUser != tc.wantFields || hasPass != tc.wantFields {
+				t.Errorf("duser present = %v, password present = %v, want both %v", hasUser, hasPass, tc.wantFields)
+			}
+
+			// Scan entries keep the connection context and the service name.
+			for _, k := range []string{"src", "spt", "dst", "dpt", "destinationServicename"} {
+				if _, ok := e.Data[k]; !ok {
+					t.Errorf("field %q is missing from the entry", k)
+				}
+			}
+			if e.Data["destinationServicename"] != "telnetd" {
+				t.Errorf("destinationServicename = %v, want telnetd", e.Data["destinationServicename"])
+			}
+
+			// The test client connects from 127.0.0.1, so every kind of attempt, scans included, is escalated.
+			if want := attemptLogLevel("127.0.0.1"); e.Level != want || want != logrus.ErrorLevel {
+				t.Errorf("level = %v, want %v (error for private IPs)", e.Level, logrus.ErrorLevel)
+			}
+		})
+	}
+}
+
+// Scans are logged at the usual level when private IPs are not escalated.
+func TestTelnetScan_LevelWithPrivateIPsAsUsual(t *testing.T) {
+	setPrivateAsUsual(t, true)
+
+	e := runTelnetAttempt(t, "", "")
+	if e.Message != "Port scan detected - empty credentials" {
+		t.Fatalf("message = %q", e.Message)
+	}
+	if e.Level != logrus.InfoLevel {
+		t.Errorf("level = %v, want info", e.Level)
+	}
+}
+
+// Tests for the rate settings in init(): SSHD_RATE, TELNET_RATE and USE_EXACT_RATE.
+// init() has already run in this process, so they run the test binary again (see runInitHelper in logging_init_test.go) and read the effective rates from the startup message.
+
+// runRates starts the helper once and returns the effective SSH and Telnet rates that init() logged.
+// SSHD_RATE, TELNET_RATE and USE_EXACT_RATE are reset first, so the caller's environment cannot leak in.
+func runRates(t *testing.T, env ...string) (sshRate, telnetRate int) {
+	t.Helper()
+
+	all := append([]string{"SSHD_RATE=", "TELNET_RATE=", "USE_EXACT_RATE="}, env...)
+	out, err := runInitHelper(t, all...)
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
+	}
+	entry := startupEntry(t, out.stdout)
+
+	sshSection, _ := entry["ssh"].(map[string]any)
+	telnetSection, _ := entry["telnet"].(map[string]any)
+	s, ok1 := sshSection["SSHD_RATE"].(float64)
+	tl, ok2 := telnetSection["TELNET_RATE"].(float64)
+	if !ok1 || !ok2 {
+		t.Fatalf("startup message lacks SSHD_RATE / TELNET_RATE: %v", entry)
+	}
+	return int(s), int(tl)
+}
+
+// sampleRates runs the helper n times and returns every effective rate.
+func sampleRates(t *testing.T, n int, env ...string) (sshRates, telnetRates []int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		s, tl := runRates(t, env...)
+		sshRates = append(sshRates, s)
+		telnetRates = append(telnetRates, tl)
+	}
+	return
+}
+
+func inRange(vals []int, lo, hi int) (bad int, ok bool) {
+	for _, v := range vals {
+		if v < lo || v > hi {
+			return v, false
+		}
+	}
+	return 0, true
+}
+
+func distinct(vals []int) int {
+	seen := map[int]bool{}
+	for _, v := range vals {
+		seen[v] = true
+	}
+	return len(seen)
+}
+
+func TestRateInit_ExactRateKeepsConfiguredValues(t *testing.T) {
+	for _, flag := range []string{"true", "1", "yes"} {
+		t.Run(flag, func(t *testing.T) {
+			s, tl := runRates(t, "SSHD_RATE=1234", "TELNET_RATE=567", "USE_EXACT_RATE="+flag)
+			if s != 1234 || tl != 567 {
+				t.Errorf("rates = ssh %d, telnet %d, want exactly 1234 and 567", s, tl)
+			}
+		})
+	}
+}
+
+func TestRateInit_ExactRateUsesDefaults(t *testing.T) {
+	s, tl := runRates(t, "USE_EXACT_RATE=true")
+	if s != 450 || tl != 100 {
+		t.Errorf("default rates = ssh %d, telnet %d, want 450 and 100", s, tl)
+	}
+}
+
+// Unset, "false" and every value other than 1/true/yes keep the random adjustment on.
+func TestRateInit_AdjustmentIsOnByDefault(t *testing.T) {
+	const base, telnetBase, runs = 1000, 500, 10
+
+	for _, flag := range []string{"", "false", "0", "no", "maybe"} {
+		t.Run("USE_EXACT_RATE="+flag, func(t *testing.T) {
+			sshRates, telnetRates := sampleRates(t, runs, "SSHD_RATE=1000", "TELNET_RATE=500", "USE_EXACT_RATE="+flag)
+
+			// SSH: -50 .. +250, Telnet: -20 .. +100 (bounds included).
+			if v, ok := inRange(sshRates, base-50, base+250); !ok {
+				t.Errorf("SSH rate %d is outside %d..%d: %v", v, base-50, base+250, sshRates)
+			}
+			if v, ok := inRange(telnetRates, telnetBase-20, telnetBase+100); !ok {
+				t.Errorf("Telnet rate %d is outside %d..%d: %v", v, telnetBase-20, telnetBase+100, telnetRates)
+			}
+			// Equal values in all runs would mean the adjustment is off or the generator is not seeded when init() draws the numbers.
+			if distinct(sshRates) < 2 {
+				t.Errorf("SSH rate was identical in %d runs (%v): the adjustment is not random", runs, sshRates)
+			}
+			if distinct(telnetRates) < 2 {
+				t.Errorf("Telnet rate was identical in %d runs (%v): the adjustment is not random", runs, telnetRates)
+			}
+		})
+	}
+}
+
+func TestRateInit_AdjustedDefaultsStayInRange(t *testing.T) {
+	sshRates, telnetRates := sampleRates(t, 10)
+	if v, ok := inRange(sshRates, 400, 700); !ok {
+		t.Errorf("SSH rate %d is outside 400..700 (default 450, -50..+250): %v", v, sshRates)
+	}
+	if v, ok := inRange(telnetRates, 80, 200); !ok {
+		t.Errorf("Telnet rate %d is outside 80..200 (default 100, -20..+100): %v", v, telnetRates)
+	}
+}
+
+// A small configured rate must never end up at zero or below, otherwise the rate limiter would divide by zero.
+func TestRateInit_AdjustedRateNeverBelowOne(t *testing.T) {
+	sshRates, telnetRates := sampleRates(t, 15, "SSHD_RATE=1", "TELNET_RATE=1")
+
+	if v, ok := inRange(sshRates, 1, 1+250); !ok {
+		t.Errorf("SSH rate %d is outside 1..251: %v", v, sshRates)
+	}
+	if v, ok := inRange(telnetRates, 1, 1+100); !ok {
+		t.Errorf("Telnet rate %d is outside 1..101: %v", v, telnetRates)
+	}
+}
+
+func TestRateInit_ExactRateAllowsOne(t *testing.T) {
+	s, tl := runRates(t, "SSHD_RATE=1", "TELNET_RATE=1", "USE_EXACT_RATE=true")
+	if s != 1 || tl != 1 {
+		t.Errorf("rates = ssh %d, telnet %d, want 1 and 1", s, tl)
+	}
+}
+
+func TestRateInit_InvalidRatesAreFatal(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     []string
+		wantErr string
+	}{
+		{"SSHD_RATE not a number", []string{"SSHD_RATE=fast"}, "Invalid SSHD_RATE"},
+		{"SSHD_RATE zero", []string{"SSHD_RATE=0"}, "Invalid SSHD_RATE"},
+		{"SSHD_RATE negative", []string{"SSHD_RATE=-5"}, "Invalid SSHD_RATE"},
+		{"TELNET_RATE not a number", []string{"TELNET_RATE=fast"}, "Invalid TELNET_RATE"},
+		{"TELNET_RATE zero", []string{"TELNET_RATE=0"}, "Invalid TELNET_RATE"},
+		{"TELNET_RATE negative", []string{"TELNET_RATE=-1"}, "Invalid TELNET_RATE"},
+		// The check is made before the adjustment, so USE_EXACT_RATE does not make an invalid value valid.
+		{"zero with exact rate", []string{"SSHD_RATE=0", "USE_EXACT_RATE=true"}, "Invalid SSHD_RATE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runInitHelper(t, tc.env...)
+			if err == nil {
+				t.Fatalf("expected a non-zero exit, output:\n%s\n%s", out.stdout, out.stderr)
+			}
+			if !strings.Contains(out.stderr, tc.wantErr) {
+				t.Errorf("stderr should mention %q:\n%s", tc.wantErr, out.stderr)
+			}
+			if strings.Contains(out.stdout+out.stderr, startupMarker) {
+				t.Error("must not start up with an invalid rate")
+			}
+		})
 	}
 }

@@ -46,6 +46,7 @@ var (
 	maxAuthTries     int
 	rsaBits          int    // only used if hostKeyType == "rsa"
 	profileScope     string // "host" or "remote_ip"
+	useExactRate     bool
 	sendBanner       bool
 	logClearPassword bool
 
@@ -262,12 +263,15 @@ func handleTelnetConnection(conn net.Conn) {
 	// Prepare message based on a port scan condition. Remove trash from the logs
 	message := "Telnet login attempt"
 	if abuse.IsHttpProtocolProbe(username) {
-		message = "HTTP Ports scan detected: " + username + "; " + loggedPassword.(string)
+		message = "Port scan detected - HTTP: " + username + "; " + loggedPassword.(string)
 		delete(fields, "duser")
 		delete(fields, "password")
-	}
-	if abuse.IsHttpsProtocolProbe(username) {
-		message = "HTTPS Ports scan detected"
+	} else if abuse.IsHttpsProtocolProbe(username) {
+		message = "Port scan detected - HTTPS"
+		delete(fields, "duser")
+		delete(fields, "password")
+	} else if username == "" && loggedPassword.(string) == "" {
+		message = "Port scan detected - empty credentials"
 		delete(fields, "duser")
 		delete(fields, "password")
 	}
@@ -275,7 +279,7 @@ func handleTelnetConnection(conn net.Conn) {
 		WithField("destinationServicename", "telnetd").
 		Log(attemptLogLevel(src), message)
 
-	// AbuseIPDB reporting
+	// Abuse reporting
 	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 	if err == nil && reportableIP(ip) {
 		abuseReporter.RecordFailure(
@@ -983,41 +987,71 @@ func init() {
 	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
 
 	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
-	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", "Take me to your leader")
-	rateStr := getEnvWithDefault("SSHD_RATE", strconv.Itoa(rand.Intn(251)+450)) // default rate is rand between 450-700 bits per second very slow...
+
+	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", "Take me to your leader") // This is legacy, could we generate it randomly on start?
+
+	rateStr := getEnvWithDefault("SSHD_RATE", "450") // default rate is 450 bytes per second very slow...
 	rate, err = strconv.Atoi(rateStr)
-	if err != nil {
+	if err != nil || rate <= 0 {
 		logrus.Fatal("Invalid SSHD_RATE environment variable")
 	}
-	telnetRateStr := getEnvWithDefault("TELNET_RATE", strconv.Itoa(rand.Intn(221)+80)) // Could be slower than SSH. Default is 80-300 bits per second.
+
+	telnetRateStr := getEnvWithDefault("TELNET_RATE", "100") // Could be slower than SSH. Default is 100 bytes per second.
 	telnetRate, err = strconv.Atoi(telnetRateStr)
 	if err != nil || telnetRate <= 0 {
 		logrus.Fatal("Invalid TELNET_RATE environment variable")
 	}
-	maxAuthTriesStr := getEnvWithDefault("SSHD_MAX_AUTH_TRIES", "6") // default amount of tries is 6-10.
+
+	// Disable random rate adjustment on start to reduce detection. Per default it is off. We will add some extra to any rate was set.
+	useExactRateStr := getEnvWithDefault("USE_EXACT_RATE", "false")
+	useExactRate = useExactRateStr == "1" || useExactRateStr == "true" || useExactRateStr == "yes"
+
+	// Random rate adjustment on start to reduce detection.
+	if !useExactRate {
+		rate += rand.Intn(301) - 50       // Between -50 and +250 bytes per second.
+		telnetRate += rand.Intn(121) - 20 // Between -20 and +100 bytes per second.
+		// Ensure rates never become zero or negative after adjustment.
+		if rate < 1 {
+			rate = 1
+		}
+		if telnetRate < 1 {
+			telnetRate = 1
+		}
+	}
+
+	maxAuthTriesStr := getEnvWithDefault("SSHD_MAX_AUTH_TRIES", "6") // default amount of tries is 6.
 	maxAuthTries, err = strconv.Atoi(maxAuthTriesStr)
 	if err != nil {
 		logrus.Fatal("Invalid SSHD_MAX_AUTH_TRIES environment variable")
 	}
+
 	rsaBitsStr := getEnvWithDefault("SSHD_RSA_BITS", "3072")
 	rsaBits, err = strconv.Atoi(rsaBitsStr)
 	if err != nil || rsaBits < 2048 {
 		logrus.Fatal("Invalid SSHD_RSA_BITS (must be >= 2048)")
 	}
+
+	// Please refer to resolveProfileKey description
 	profileScope = getEnvWithDefault("SSHD_PROFILE_SCOPE", "host")
+
 	// Seed for non-deterministic uses to avoid identical timing patterns across restarts
 	// Fine for delays and banner selection — no security issue.
 	rand.Seed(time.Now().UnixNano())
+
 	// Banner sending option
 	sendBannerStr := getEnvWithDefault("SSHD_SEND_BANNER", "false")
 	sendBanner = sendBannerStr == "1" || sendBannerStr == "true" || sendBannerStr == "yes"
+
 	logClearPasswordStr := getEnvWithDefault("SSHD_LOG_CLEAR_PASSWORD", "true")
 	logClearPassword = logClearPasswordStr == "1" || logClearPasswordStr == "true" || logClearPasswordStr == "yes"
+
 	telnetLogClearPasswordStr := getEnvWithDefault("TELNET_LOG_CLEAR_PASSWORD", "true")
 	telnetLogClearPassword = telnetLogClearPasswordStr == "1" || telnetLogClearPasswordStr == "true" || telnetLogClearPasswordStr == "yes"
+
 	// Connections from private IPs are logged as warnings and their login attempts as errors, unless this is set.
 	logPrivateIPsAsUsualStr := getEnvWithDefault("LOG_PRIVATE_IPS_AS_USUAL", "false")
 	logPrivateIPsAsUsual = logPrivateIPsAsUsualStr == "1" || logPrivateIPsAsUsualStr == "true" || logPrivateIPsAsUsualStr == "yes"
+
 	// Comma-separated list of allowed fields, "" means all, " " means none
 	logsEnv := getEnvWithDefault("LOG_FILTER", "")
 
