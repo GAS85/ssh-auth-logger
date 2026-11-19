@@ -26,13 +26,23 @@ Donations:
 
 ## Interesting features
 
+- Structured logging
+- "Random" host keys
+- Different profiles - each IP get some different profile with welcome banner, ciphers and keys support
+- Force specific profile
+- Optional Web UI with separate container
+- Abuse reporting to different DBs
+- Ports scan detection
+- Statistic endpoint
+- SSH and Telnet Rate limiting, with default slow network simulation
+
 ### Structured logging
 
 ssh-auth-logger logs all authentication attempts as json making it easy to consume in other tools.  No more ugly [openssh log parsing vulnerabilities](http://dcid.me/texts/attacking-log-analysis-tools.html).
 
 ### "Random" host keys
 
-ssh-auth-logger uses HMAC to hash the destination IP address and a key in order to generate a consistently "random" key for every responding IP address.  This means you can run ssh-auth-logger on a /16 and every ip address will appear with a different host key. Random sshd version reporting as well.
+ssh-auth-logger uses HMAC to hash the destination IP address and a key in order to generate a consistently "random" key for every responding IP address. This means you can run ssh-auth-logger on a /16 and every ip address will appear with a different host key. Random sshd version reporting as well.
 
 ### Web UI
 
@@ -164,7 +174,7 @@ services:
 
       # SSHD Part
 
-      #- SSHD_RATE=500                         # bits per second, emulate very slow connection
+      #- SSHD_RATE=450                         # bytes per second, emulate very slow connection
       #- SSHD_BIND=:2222                       # Port and interface sshd to listen
       #- SSHD_KEY_KEY="Take me to your leader" # It's a secret key that is used to generate a deterministic hash value for a given host IP address
       #- SSHD_MAX_AUTH_TRIES=6                 # The minimum number of authentication attempts allowed
@@ -180,7 +190,7 @@ services:
 
       #- TELNET_BIND=:2323              # Port and interface telnetd to listen
       #- TELNET_LOG_CLEAR_PASSWORD=true # Log Passwords as clear text or Base64 coded
-      #- TELNET_RATE=100                # bits per second, emulate very slow connection
+      #- TELNET_RATE=100                # bytes per second, emulate very slow connection
     volumes:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log
@@ -490,6 +500,24 @@ ignoreregex =
 ```
 
 Set `maxretry` for this filter around 1,5 - 2 bigger than for a [Block logging attempts `maxretry`](#block-logging-attempts).
+
+### Block Port scan
+
+The same approach as above, but with different filter:
+
+```shell
+[Definition]
+_daemon = ssh-auth-logger
+
+# Match JSON log line with a "time", "msg" fields and a "src" IP
+failregex = ^.*"msg":"Port scan detected - .*".*"src":"<HOST>".*$
+
+datepattern = %%Y-%%m-%%dT%%H:%%M:%%S(?:Z|%%z)
+
+ignoreregex =
+```
+
+Set `maxretry` for this filter 1 or 2. 1 HTTP/HTTPS or empty Credentials hit will cause ban.
 
 ## Cacti integration ![Cacti icon](https://avatars.githubusercontent.com/u/5142645?s=30&v=4)
 
