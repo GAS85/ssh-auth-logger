@@ -1077,14 +1077,14 @@ func init() {
 
 	// Configure Host key cache TTL
 	hostKeyCacheTTLStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_TTL", "24h")
-	hostKeyCacheTTL, err := time.ParseDuration(hostKeyCacheTTLStr)
+	hostKeyCacheTTL, err = time.ParseDuration(hostKeyCacheTTLStr)
 	if err != nil || hostKeyCacheTTL <= 0 {
 		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_TTL")
 	}
 
 	// Configure cache cleanup interval
 	hostKeyCacheCleanupStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_CLEANUP", "1h")
-	hostKeyCacheCleanup, err := time.ParseDuration(hostKeyCacheCleanupStr)
+	hostKeyCacheCleanup, err = time.ParseDuration(hostKeyCacheCleanupStr)
 	if err != nil || hostKeyCacheCleanup <= 0 {
 		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_CLEANUP")
 	}
