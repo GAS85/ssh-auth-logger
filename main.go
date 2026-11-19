@@ -948,10 +948,10 @@ func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 		// This should never happen because auth never succeeds
 		logrus.Panic("Successful login? why!?")
 	}
-	if err != nil {
-		// Auth failed or client closed connection — expected behavior
-		return
-	}
+	// if err != nil {
+	// 	// Auth failed or client closed connection — expected behavior
+	// 	return
+	// }
 }
 
 // getEnvWithDefault returns the environment value for key
@@ -1004,7 +1004,7 @@ func init() {
 
 	// Disable random rate adjustment on start to reduce detection. Per default it is off. We will add some extra to any rate was set.
 	useExactRateStr := getEnvWithDefault("USE_EXACT_RATE", "false")
-	useExactRate = useExactRateStr == "1" || useExactRateStr == "true" || useExactRateStr == "yes"
+	useExactRate = useExactRateStr == "1" || strings.EqualFold(useExactRateStr, "true") || strings.EqualFold(useExactRateStr, "yes")
 
 	// Random rate adjustment on start to reduce detection.
 	if !useExactRate {
@@ -1040,17 +1040,17 @@ func init() {
 
 	// Banner sending option
 	sendBannerStr := getEnvWithDefault("SSHD_SEND_BANNER", "false")
-	sendBanner = sendBannerStr == "1" || sendBannerStr == "true" || sendBannerStr == "yes"
+	sendBanner = sendBannerStr == "1" || strings.EqualFold(sendBannerStr, "true") || strings.EqualFold(sendBannerStr, "yes")
 
 	logClearPasswordStr := getEnvWithDefault("SSHD_LOG_CLEAR_PASSWORD", "true")
-	logClearPassword = logClearPasswordStr == "1" || logClearPasswordStr == "true" || logClearPasswordStr == "yes"
+	logClearPassword = logClearPasswordStr == "1" || strings.EqualFold(logClearPasswordStr, "true") || strings.EqualFold(logClearPasswordStr, "yes")
 
 	telnetLogClearPasswordStr := getEnvWithDefault("TELNET_LOG_CLEAR_PASSWORD", "true")
-	telnetLogClearPassword = telnetLogClearPasswordStr == "1" || telnetLogClearPasswordStr == "true" || telnetLogClearPasswordStr == "yes"
+	telnetLogClearPassword = telnetLogClearPasswordStr == "1" || strings.EqualFold(telnetLogClearPasswordStr, "true") || strings.EqualFold(telnetLogClearPasswordStr, "yes")
 
 	// Connections from private IPs are logged as warnings and their login attempts as errors, unless this is set.
 	logPrivateIPsAsUsualStr := getEnvWithDefault("LOG_PRIVATE_IPS_AS_USUAL", "false")
-	logPrivateIPsAsUsual = logPrivateIPsAsUsualStr == "1" || logPrivateIPsAsUsualStr == "true" || logPrivateIPsAsUsualStr == "yes"
+	logPrivateIPsAsUsual = logPrivateIPsAsUsualStr == "1" || strings.EqualFold(logPrivateIPsAsUsualStr, "true") || strings.EqualFold(logPrivateIPsAsUsualStr, "yes")
 
 	// Comma-separated list of allowed fields, "" means all, " " means none
 	logsEnv := getEnvWithDefault("LOG_FILTER", "")
@@ -1106,6 +1106,7 @@ func init() {
 			"SSHD_LOG_CLEAR_PASSWORD":     logClearPassword,
 			"SSHD_HOST_KEY_CACHE_TTL":     hostKeyCacheTTL.String(),
 			"SSHD_HOST_KEY_CACHE_CLEANUP": hostKeyCacheCleanup.String(),
+			"USE_EXACT_RATE":              useExactRate,
 		},
 		"telnet": logrus.Fields{
 			"TELNET_BIND":               telnetBind,
