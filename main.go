@@ -785,7 +785,7 @@ func getServerProfile(host string) serverProfile {
 	return serverProfiles[int(seed)%len(serverProfiles)]
 }
 
-func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
+func makeSSHConfig(conn net.Conn) (ssh.ServerConfig, error) {
 	state := &authState{}
 	// per‑local host profile
 	//	profile := getServerProfile(host)
@@ -891,7 +891,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	// Generate primary host key signer
 	primarySigner, err := getHostKeySigner(profileKey, profile.HostKeyType)
 	if err != nil {
-		logrus.Panic(err)
+		return ssh.ServerConfig{}, fmt.Errorf("host key for profile %q: %w", profileKey, err)
 	}
 
 	primaryType := primarySigner.PublicKey().Type()
@@ -920,7 +920,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	// capture primary type for logging
 	actualHostKeyType = primaryType
 
-	return config
+	return config, nil
 }
 
 // serveSSHConn counts and logs a freshly accepted SSH connection and handles it in the background.
@@ -935,9 +935,15 @@ func serveSSHConn(conn net.Conn) {
 	logger.WithFields(withReputation(connFields)).Log(connLogLevel(src), "SSH connection")
 
 	limitedConn := newRateLimitedConn(conn, rate)
-	config := makeSSHConfig(conn)
+	// Host key generation can take seconds (RSA), so it happens in the connection's goroutine and never blocks the accept loop.
 	go func() {
 		defer open.Add(-1)
+		config, err := makeSSHConfig(conn)
+		if err != nil {
+			logger.WithFields(connFields).WithError(err).Error("Cannot set up SSH host keys, closing connection")
+			conn.Close()
+			return
+		}
 		handleConnection(limitedConn, &config)
 	}()
 }
