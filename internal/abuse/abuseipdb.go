@@ -59,15 +59,15 @@ func newAbuseIPDBFromEnv() (Backend, logrus.Fields) {
 		return nil, nil
 	}
 
-	apiKey := startup.GetEnvWithDefault("ABUSEIPDB_API_KEY", "")
+	apiKey := getenv("ABUSEIPDB_API_KEY", "")
 	if apiKey == "" {
 		logrus.Fatal("ABUSEIPDB_ENABLED is enabled but ABUSEIPDB_API_KEY is empty")
 	}
 
 	// 18=Brute-Force, 22=SSH
-	sshCategories := startup.GetEnvWithDefault("ABUSEIPDB_SSH_CATEGORIES", "18,22")
+	sshCategories := getenv("ABUSEIPDB_SSH_CATEGORIES", "18,22")
 	// 14=Port Scan, 18=Brute-Force, 23=IoT Targeted
-	telnetCategories := startup.GetEnvWithDefault("ABUSEIPDB_TELNET_CATEGORIES", "14,18,23")
+	telnetCategories := getenv("ABUSEIPDB_TELNET_CATEGORIES", "14,18,23")
 
 	clearUsername := envBool("ABUSEIPDB_REPORT_CLEAR_USERNAME", "false")
 	clearPassword := envBool("ABUSEIPDB_REPORT_CLEAR_PASSWORD", "false")

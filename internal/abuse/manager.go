@@ -625,26 +625,26 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 
 	var err error
 
-	abuseAttemptsStr := startup.GetEnvWithDefault("ABUSE_REPORT_ATTEMPTS", "10")
+	abuseAttemptsStr := getenv("ABUSE_REPORT_ATTEMPTS", "10")
 	abuseAttempts, err = strconv.Atoi(abuseAttemptsStr)
 	if err != nil || abuseAttempts <= 0 {
 		logrus.Fatal("Invalid ABUSE_REPORT_ATTEMPTS environment variable")
 	}
 
 	// AbuseIPDB allows one report per IP every 15 minutes: https://www.abuseipdb.com/api.html
-	abuseReportIntervalStr := startup.GetEnvWithDefault("ABUSE_REPORT_INTERVAL", "15m")
+	abuseReportIntervalStr := getenv("ABUSE_REPORT_INTERVAL", "15m")
 	abuseReportInterval, err = time.ParseDuration(abuseReportIntervalStr)
 	if err != nil || abuseReportInterval <= 0 {
 		logrus.Fatal("Invalid ABUSE_REPORT_INTERVAL environment variable")
 	}
 
-	abuseCleanupIntervalStr := startup.GetEnvWithDefault("ABUSE_CLEANUP_INTERVAL", "30m")
+	abuseCleanupIntervalStr := getenv("ABUSE_CLEANUP_INTERVAL", "30m")
 	abuseCleanupInterval, err = time.ParseDuration(abuseCleanupIntervalStr)
 	if err != nil || abuseCleanupInterval <= 0 {
 		logrus.Fatal("Invalid ABUSE_CLEANUP_INTERVAL environment variable")
 	}
 
-	abuseStateExpiryStr := startup.GetEnvWithDefault("ABUSE_STATE_EXPIRY", "2h")
+	abuseStateExpiryStr := getenv("ABUSE_STATE_EXPIRY", "2h")
 	abuseStateExpiry, err = time.ParseDuration(abuseStateExpiryStr)
 	if err != nil || abuseStateExpiry <= 0 {
 		logrus.Fatal("Invalid ABUSE_STATE_EXPIRY environment variable")
@@ -690,7 +690,7 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 
 // envBool reads a boolean environment variable ("1", "true" or "yes" means true).
 func envBool(name, def string) bool {
-	v := startup.GetEnvWithDefault(name, def)
+	v := getenv(name, def)
 	return v == "1" || v == "true" || v == "yes"
 }
 
