@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 )
 
@@ -48,8 +49,8 @@ func newBlocklistDeFromEnv() (Backend, logrus.Fields) {
 		return nil, nil
 	}
 
-	server := getenv("BLOCKLIST_SERVER", "")
-	apiKey := getenv("BLOCKLIST_API_KEY", "")
+	server := startup.GetEnvWithDefault("BLOCKLIST_SERVER", "")
+	apiKey := startup.GetEnvWithDefault("BLOCKLIST_API_KEY", "")
 	if server == "" || apiKey == "" {
 		logrus.Fatal("BLOCKLIST_ENABLED is enabled but BLOCKLIST_SERVER or BLOCKLIST_API_KEY is empty")
 	}
@@ -63,10 +64,10 @@ func newBlocklistDeFromEnv() (Backend, logrus.Fields) {
 		server: server,
 		apiKey: apiKey,
 
-		sshService: getenv("BLOCKLIST_SSH_SERVICE", "ssh-auth"),
+		sshService: startup.GetEnvWithDefault("BLOCKLIST_SSH_SERVICE", "ssh-auth"),
 		// blocklist.de has no "telnet" service in its published list. Will set one from apache
 		// https://www.blocklist.de/en/download.html#services
-		telnetService: getenv("BLOCKLIST_TELNET_SERVICE", "bruteforcelogin"),
+		telnetService: startup.GetEnvWithDefault("BLOCKLIST_TELNET_SERVICE", "bruteforcelogin"),
 
 		reportClearUsername:  clearUsername,
 		reportClearPassword:  clearPassword && !hashedPassword,
@@ -80,16 +81,20 @@ func newBlocklistDeFromEnv() (Backend, logrus.Fields) {
 		},
 	}
 
+	// Build static part for startup output
+	blocklistFields := logrus.Fields{
+		"BLOCKLIST_ENABLED": true,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_SSH_SERVICE", b.sshService, "ssh-auth")
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_TELNET_SERVICE", b.telnetService, "bruteforcelogin")
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_REPORT_CLEAR_USERNAME", b.reportClearUsername, true)
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_REPORT_CLEAR_PASSWORD", b.reportClearPassword, false)
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_REPORT_HASHED_PASSWORD", b.reportHashedPassword, true)
+
 	// The server e-mail / API key are deliberately not part of the startup log.
 	return b, logrus.Fields{
-		"blocklist": logrus.Fields{
-			"BLOCKLIST_ENABLED":                true,
-			"BLOCKLIST_SSH_SERVICE":            b.sshService,
-			"BLOCKLIST_TELNET_SERVICE":         b.telnetService,
-			"BLOCKLIST_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
-			"BLOCKLIST_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
-			"BLOCKLIST_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
-		},
+		"blocklist": blocklistFields,
 	}
 }
 
