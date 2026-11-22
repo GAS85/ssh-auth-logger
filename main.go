@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GAS85/ssh-auth-logger/internal/abuse"
 	"github.com/GAS85/ssh-auth-logger/internal/common"
@@ -264,13 +266,13 @@ func handleTelnetConnection(conn net.Conn) {
 	// This will show the password in cleartext if telnetLogClearPassword is true, otherwise it will log the base64 encoded if telnetLogClearPassword is false
 	var loggedPassword any
 	if telnetLogClearPassword {
-		loggedPassword = string(password)
+		loggedPassword = loggableText(password)
 	} else {
 		loggedPassword = base64.StdEncoding.EncodeToString([]byte(password))
 	}
 
 	fields := connLogParameters(conn)
-	fields["duser"] = username
+	fields["duser"] = loggableText(username)
 	fields["password"] = loggedPassword
 	fields["protocol"] = "telnet"
 
@@ -291,7 +293,7 @@ func handleTelnetConnection(conn net.Conn) {
 	if !isScan {
 		ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 		if err == nil && reportableIP(ip) {
-			abuseReporter.RecordFailure(ip, "Telnet", username, password)
+			abuseReporter.RecordFailure(ip, "Telnet", loggableText(username), loggableText(password))
 		}
 	}
 
@@ -307,6 +309,8 @@ func classifyTelnetAttempt(username, loggedPassword string) (message string, sca
 		return "Ports scan detected - HTTP: " + username + "; " + loggedPassword, true
 	case isHttpsProtocolProbe(username):
 		return "Ports scan detected - HTTPS", true
+	case isBinaryProbe(username):
+		return fmt.Sprintf("Ports scan detected - binary data (%d bytes): %s", len(username), hexPreview(username)), true
 	case username == "" && loggedPassword == "":
 		return "Ports scan detected - empty credentials", true
 	}
@@ -336,6 +340,34 @@ func isHttpProtocolProbe(username string) bool {
 // ...or the start of a TLS handshake (record header 0x16 0x03).
 func isHttpsProtocolProbe(username string) bool {
 	return strings.HasPrefix(username, "\x16\x03")
+}
+
+// isBinaryProbe reports whether username contains control characters (tab excepted). A person typing a login name never produces those, so it is the start of some other (binary) protocol sent to the telnet port, e.g. telnet option negotiation or a NUL-padded handshake. Bytes >= 0x80 are deliberately not a criterion: a legacy encoding such as GBK is not valid UTF-8 but is a real login attempt, see loggableText.
+func isBinaryProbe(username string) bool {
+	for i := 0; i < len(username); i++ {
+		if c := username[i]; c < 0x20 && c != '\t' || c == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// loggableText returns s unchanged if it is valid UTF-8. Otherwise the bytes are shown as \xNN escapes (for example a GBK encoded name): the JSON log encoder would replace invalid bytes with U+FFFD and lose the data.
+func loggableText(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	q := strconv.QuoteToASCII(s)
+	return q[1 : len(q)-1]
+}
+
+// hexPreview renders at most the first 32 bytes of s as hex, so binary data is readable and safe to log.
+func hexPreview(s string) string {
+	const max = 32
+	if len(s) > max {
+		return hex.EncodeToString([]byte(s[:max])) + "..."
+	}
+	return hex.EncodeToString([]byte(s))
 }
 
 // readLine reads one line from conn. It gives up after telnetReadDeadline in total and keeps at most
@@ -875,7 +907,7 @@ func getServerProfile(host string) serverProfile {
 	return serverProfiles[profileIndex(seed, len(serverProfiles))]
 }
 
-// profileIndex maps a seed to an index in [0, n). It works on the unsigned value, so negative seeds,including math.MinInt64 (which cannot be negated), always give a valid index.
+// profileIndex maps a seed to an index in [0, n). It works on the unsigned value, so negative seeds, including math.MinInt64 (which cannot be negated), always give a valid index.
 func profileIndex(seed int64, n int) int {
 	return int(uint64(seed) % uint64(n))
 }
