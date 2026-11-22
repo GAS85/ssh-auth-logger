@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 )
 
@@ -78,18 +79,19 @@ func newDShieldFromEnv() (Backend, logrus.Fields) {
 		return nil, nil
 	}
 
-	userID := getenv("DSHIELD_USERID", "")
-	apiKey := getenv("DSHIELD_API_KEY", "")
+	userID := startup.GetEnvWithDefault("DSHIELD_USERID", "")
+	apiKey := startup.GetEnvWithDefault("DSHIELD_API_KEY", "")
 	if userID == "" || apiKey == "" {
 		logrus.Fatal("DSHIELD_ENABLED is enabled but DSHIELD_USERID or DSHIELD_API_KEY is empty")
 	}
 
-	batchSize, err := strconv.Atoi(getenv("DSHIELD_BATCH_SIZE", "50"))
+	batchSize, err := strconv.Atoi(startup.GetEnvWithDefault("DSHIELD_BATCH_SIZE", "50"))
 	if err != nil || batchSize <= 0 {
 		logrus.Fatal("Invalid DSHIELD_BATCH_SIZE environment variable")
 	}
 
-	flushEvery, err := time.ParseDuration(getenv("DSHIELD_BATCH_INTERVAL", "10m"))
+	flushEveryStr := startup.GetEnvWithDefault("DSHIELD_BATCH_INTERVAL", "10m")
+	flushEvery, err := time.ParseDuration(flushEveryStr)
 	if err != nil || flushEvery <= 0 {
 		logrus.Fatal("Invalid DSHIELD_BATCH_INTERVAL environment variable")
 	}
@@ -129,17 +131,21 @@ func newDShieldFromEnv() (Backend, logrus.Fields) {
 	b.loopDone = make(chan struct{})
 	go b.flushLoop()
 
+	// Build static part for startup output
+	dshieldFields := logrus.Fields{
+		"DSHIELD_ENABLED": true,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_USERID", b.userID, "")
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_BATCH_SIZE", b.batchSize, 50)
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_BATCH_INTERVAL", flushEveryStr, "10m")
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_REPORT_CLEAR_USERNAME", b.reportClearUsername, true)
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_REPORT_CLEAR_PASSWORD", b.reportClearPassword, true)
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_REPORT_HASHED_PASSWORD", b.reportHashedPassword, false)
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_DEBUG", b.debug, false)
+
 	return b, logrus.Fields{
-		"dshield": logrus.Fields{
-			"DSHIELD_ENABLED":                true,
-			"DSHIELD_USERID":                 b.userID,
-			"DSHIELD_BATCH_SIZE":             b.batchSize,
-			"DSHIELD_BATCH_INTERVAL":         b.flushEvery.String(),
-			"DSHIELD_DEBUG":                  b.debug,
-			"DSHIELD_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
-			"DSHIELD_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
-			"DSHIELD_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
-		},
+		"abuseipdb": dshieldFields,
 	}
 }
 

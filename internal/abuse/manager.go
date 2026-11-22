@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 )
 
@@ -624,23 +625,27 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 
 	var err error
 
-	abuseAttempts, err = strconv.Atoi(getenv("ABUSE_REPORT_ATTEMPTS", "10"))
+	abuseAttemptsStr := startup.GetEnvWithDefault("ABUSE_REPORT_ATTEMPTS", "10")
+	abuseAttempts, err = strconv.Atoi(abuseAttemptsStr)
 	if err != nil || abuseAttempts <= 0 {
 		logrus.Fatal("Invalid ABUSE_REPORT_ATTEMPTS environment variable")
 	}
 
 	// AbuseIPDB allows one report per IP every 15 minutes: https://www.abuseipdb.com/api.html
-	abuseReportInterval, err = time.ParseDuration(getenv("ABUSE_REPORT_INTERVAL", "15m"))
+	abuseReportIntervalStr := startup.GetEnvWithDefault("ABUSE_REPORT_INTERVAL", "15m")
+	abuseReportInterval, err = time.ParseDuration(abuseReportIntervalStr)
 	if err != nil || abuseReportInterval <= 0 {
 		logrus.Fatal("Invalid ABUSE_REPORT_INTERVAL environment variable")
 	}
 
-	abuseCleanupInterval, err = time.ParseDuration(getenv("ABUSE_CLEANUP_INTERVAL", "30m"))
+	abuseCleanupIntervalStr := startup.GetEnvWithDefault("ABUSE_CLEANUP_INTERVAL", "30m")
+	abuseCleanupInterval, err = time.ParseDuration(abuseCleanupIntervalStr)
 	if err != nil || abuseCleanupInterval <= 0 {
 		logrus.Fatal("Invalid ABUSE_CLEANUP_INTERVAL environment variable")
 	}
 
-	abuseStateExpiry, err = time.ParseDuration(getenv("ABUSE_STATE_EXPIRY", "2h"))
+	abuseStateExpiryStr := startup.GetEnvWithDefault("ABUSE_STATE_EXPIRY", "2h")
+	abuseStateExpiry, err = time.ParseDuration(abuseStateExpiryStr)
 	if err != nil || abuseStateExpiry <= 0 {
 		logrus.Fatal("Invalid ABUSE_STATE_EXPIRY environment variable")
 	}
@@ -648,12 +653,12 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 	var backends []Backend
 	fields := logrus.Fields{}
 
-	abuseFields := logrus.Fields{
-		"ABUSE_REPORT_ATTEMPTS":  abuseAttempts,
-		"ABUSE_REPORT_INTERVAL":  abuseReportInterval.String(),
-		"ABUSE_CLEANUP_INTERVAL": abuseCleanupInterval.String(),
-		"ABUSE_STATE_EXPIRY":     abuseStateExpiry.String(),
-	}
+	abuseFields := logrus.Fields{}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(abuseFields, "ABUSE_REPORT_ATTEMPTS", abuseAttempts, 10)
+	startup.AddIfNotDefault(abuseFields, "ABUSE_REPORT_INTERVAL", abuseReportIntervalStr, "15m")
+	startup.AddIfNotDefault(abuseFields, "ABUSE_CLEANUP_INTERVAL", abuseCleanupIntervalStr, "30m")
+	startup.AddIfNotDefault(abuseFields, "ABUSE_STATE_EXPIRY", abuseStateExpiryStr, "2h")
 
 	for _, factory := range abuseBackendFactories {
 		b, f := factory()
@@ -685,7 +690,7 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 
 // envBool reads a boolean environment variable ("1", "true" or "yes" means true).
 func envBool(name, def string) bool {
-	v := getenv(name, def)
+	v := startup.GetEnvWithDefault(name, def)
 	return v == "1" || v == "true" || v == "yes"
 }
 

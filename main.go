@@ -19,6 +19,7 @@ import (
 
 	"github.com/GAS85/ssh-auth-logger/internal/abuse"
 	"github.com/GAS85/ssh-auth-logger/internal/common"
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -1001,16 +1002,6 @@ func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	// }
 }
 
-// getEnvWithDefault returns the environment value for key
-// returning fallback instead if it is missing or blank
-func getEnvWithDefault(key, fallback string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return fallback
-	}
-	return value
-}
-
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
@@ -1022,37 +1013,37 @@ func init() {
 	logrus.SetLevel(level)
 
 	// Log destination: LOG_TO=console (default), file or both. Until the startup message is out, everything is also written to the console (see logOutputs), so the configuration is always visible there; afterwards only LOG_TO decides.
-	logFilePath := getEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
+	logFilePath := startup.GetEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
 	// On the console, info and debug lines go to stdout, warnings and above to stderr; a log file gets both.
-	logOut, err := common.SetupLogOutput(getEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stdout, os.Stderr)
+	logOut, err := common.SetupLogOutput(startup.GetEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stdout, os.Stderr)
 	if err != nil {
 		logrus.Fatal(err)
 	}
 	logDest = logOut
 	logOut.UseStartup(logrus.StandardLogger())
 
-	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
+	telnetBind = startup.GetEnvWithDefault("TELNET_BIND", ":23")
 
-	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
+	sshd_bind = startup.GetEnvWithDefault("SSHD_BIND", ":22")
 
 	// Host keys are predictable for anyone running defaults. That makes the honeypot fingerprintable.
 	// Generate random seed if nothing provided
-	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", fmt.Sprintf("%016x%016x", rand.Uint64(), rand.Uint64()))
+	sshd_key_key = startup.GetEnvWithDefault("SSHD_KEY_KEY", fmt.Sprintf("%016x%016x", rand.Uint64(), rand.Uint64()))
 
-	rateStr := getEnvWithDefault("SSHD_RATE", "450") // default rate is 450 bytes per second very slow...
+	rateStr := startup.GetEnvWithDefault("SSHD_RATE", "450") // default rate is 450 bytes per second very slow...
 	rate, err = strconv.Atoi(rateStr)
 	if err != nil || rate <= 0 {
 		logrus.Fatal("Invalid SSHD_RATE environment variable")
 	}
 
-	telnetRateStr := getEnvWithDefault("TELNET_RATE", "100") // Could be slower than SSH. Default is 100 bytes per second.
+	telnetRateStr := startup.GetEnvWithDefault("TELNET_RATE", "100") // Could be slower than SSH. Default is 100 bytes per second.
 	telnetRate, err = strconv.Atoi(telnetRateStr)
 	if err != nil || telnetRate <= 0 {
 		logrus.Fatal("Invalid TELNET_RATE environment variable")
 	}
 
 	// Disable random rate adjustment on start to reduce detection. Per default it is off. We will add some extra to any rate was set.
-	useExactRateStr := getEnvWithDefault("USE_EXACT_RATE", "false")
+	useExactRateStr := startup.GetEnvWithDefault("USE_EXACT_RATE", "false")
 	useExactRate = useExactRateStr == "1" || strings.EqualFold(useExactRateStr, "true") || strings.EqualFold(useExactRateStr, "yes")
 
 	// Random rate adjustment on start to reduce detection.
@@ -1068,51 +1059,51 @@ func init() {
 		}
 	}
 
-	maxAuthTriesStr := getEnvWithDefault("SSHD_MAX_AUTH_TRIES", "6") // default amount of tries is 6.
+	maxAuthTriesStr := startup.GetEnvWithDefault("SSHD_MAX_AUTH_TRIES", "6") // default amount of tries is 6.
 	maxAuthTries, err = strconv.Atoi(maxAuthTriesStr)
 	if err != nil {
 		logrus.Fatal("Invalid SSHD_MAX_AUTH_TRIES environment variable")
 	}
 
-	rsaBitsStr := getEnvWithDefault("SSHD_RSA_BITS", "3072")
+	rsaBitsStr := startup.GetEnvWithDefault("SSHD_RSA_BITS", "3072")
 	rsaBits, err = strconv.Atoi(rsaBitsStr)
 	if err != nil || rsaBits < 2048 {
 		logrus.Fatal("Invalid SSHD_RSA_BITS (must be >= 2048)")
 	}
 
 	// Please refer to resolveProfileKey description
-	profileScope = getEnvWithDefault("SSHD_PROFILE_SCOPE", "host")
+	profileScope = startup.GetEnvWithDefault("SSHD_PROFILE_SCOPE", "host")
 
 	// Seed for non-deterministic uses to avoid identical timing patterns across restarts
 	// Fine for delays and banner selection — no security issue.
 	rand.Seed(time.Now().UnixNano())
 
 	// Banner sending option
-	sendBannerStr := getEnvWithDefault("SSHD_SEND_BANNER", "false")
+	sendBannerStr := startup.GetEnvWithDefault("SSHD_SEND_BANNER", "false")
 	sendBanner = sendBannerStr == "1" || strings.EqualFold(sendBannerStr, "true") || strings.EqualFold(sendBannerStr, "yes")
 
-	logClearPasswordStr := getEnvWithDefault("SSHD_LOG_CLEAR_PASSWORD", "true")
+	logClearPasswordStr := startup.GetEnvWithDefault("SSHD_LOG_CLEAR_PASSWORD", "true")
 	logClearPassword = logClearPasswordStr == "1" || strings.EqualFold(logClearPasswordStr, "true") || strings.EqualFold(logClearPasswordStr, "yes")
 
-	telnetLogClearPasswordStr := getEnvWithDefault("TELNET_LOG_CLEAR_PASSWORD", "true")
+	telnetLogClearPasswordStr := startup.GetEnvWithDefault("TELNET_LOG_CLEAR_PASSWORD", "true")
 	telnetLogClearPassword = telnetLogClearPasswordStr == "1" || strings.EqualFold(telnetLogClearPasswordStr, "true") || strings.EqualFold(telnetLogClearPasswordStr, "yes")
 
 	// Connections from private IPs are logged as warnings and their login attempts as errors, unless this is set.
-	logPrivateIPsAsUsualStr := getEnvWithDefault("LOG_PRIVATE_IPS_AS_USUAL", "false")
+	logPrivateIPsAsUsualStr := startup.GetEnvWithDefault("LOG_PRIVATE_IPS_AS_USUAL", "false")
 	logPrivateIPsAsUsual = logPrivateIPsAsUsualStr == "1" || strings.EqualFold(logPrivateIPsAsUsualStr, "true") || strings.EqualFold(logPrivateIPsAsUsualStr, "yes")
 
 	// Comma-separated list of allowed fields, "" means all, " " means none
-	logsEnv := getEnvWithDefault("LOG_FILTER", "")
+	logsEnv := startup.GetEnvWithDefault("LOG_FILTER", "")
 
 	// Configure Host key cache TTL
-	hostKeyCacheTTLStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_TTL", "24h")
+	hostKeyCacheTTLStr := startup.GetEnvWithDefault("SSHD_HOST_KEY_CACHE_TTL", "24h")
 	hostKeyCacheTTL, err = time.ParseDuration(hostKeyCacheTTLStr)
 	if err != nil || hostKeyCacheTTL <= 0 {
 		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_TTL")
 	}
 
 	// Configure cache cleanup interval
-	hostKeyCacheCleanupStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_CLEANUP", "1h")
+	hostKeyCacheCleanupStr := startup.GetEnvWithDefault("SSHD_HOST_KEY_CACHE_CLEANUP", "1h")
 	hostKeyCacheCleanup, err = time.ParseDuration(hostKeyCacheCleanupStr)
 	if err != nil || hostKeyCacheCleanup <= 0 {
 		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_CLEANUP")
@@ -1127,13 +1118,54 @@ func init() {
 	var abuseStartupFields logrus.Fields
 	abuseReporter, abuseStartupFields = abuse.Setup(abuse.Options{
 		Logger:    logger,
-		Getenv:    getEnvWithDefault,
+		Getenv:    startup.GetEnvWithDefault,
 		UserAgent: appName + "/" + appVersion,
 	})
 
 	// Optional REST endpoint with live statistics (disabled unless STATS_BIND is set).
-	statsBind = getEnvWithDefault("STATS_BIND", "")
-	statsToken = getEnvWithDefault("STATS_TOKEN", "")
+	statsBind = startup.GetEnvWithDefault("STATS_BIND", "")
+	statsToken = startup.GetEnvWithDefault("STATS_TOKEN", "")
+
+	// Build static ssh part for startup output
+	sshFields := logrus.Fields{
+		// Always displayed
+		"SSHD_BIND":    sshd_bind,
+		"SSHD_KEY_KEY": sshd_key_key,
+		"SSHD_RATE":    rate,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(sshFields, "SSHD_SEND_BANNER", sendBanner, false)
+	startup.AddIfNotDefault(sshFields, "SSHD_MAX_AUTH_TRIES", maxAuthTries, 6)
+	startup.AddIfNotDefault(sshFields, "SSHD_RSA_BITS", rsaBits, 3072)
+	startup.AddIfNotDefault(sshFields, "SSHD_PROFILE_SCOPE", profileScope, "host")
+	startup.AddIfNotDefault(sshFields, "SSHD_LOG_CLEAR_PASSWORD", logClearPassword, true)
+	startup.AddIfNotDefault(sshFields, "SSHD_HOST_KEY_CACHE_TTL", hostKeyCacheTTLStr, "24h")
+	startup.AddIfNotDefault(sshFields, "SSHD_HOST_KEY_CACHE_CLEANUP", hostKeyCacheCleanupStr, "1h")
+	startup.AddIfNotDefault(sshFields, "USE_EXACT_RATE", useExactRate, false)
+
+	// Build static telnet part for startup output
+	telnetFields := logrus.Fields{
+		"TELNET_BIND": telnetBind,
+		"TELNET_RATE": telnetRate,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(telnetFields, "TELNET_LOG_CLEAR_PASSWORD", telnetLogClearPassword, true)
+
+	// Build static Logging part for startup output
+	loggingFields := logrus.Fields{
+		"LOG_TO": logOut.Mode,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(loggingFields, "LOG_FILE_PATH", logFilePath, "")
+	startup.AddIfNotDefault(loggingFields, "LOG_FILTER", logsEnv, "")
+	startup.AddIfNotDefault(loggingFields, "LOG_PRIVATE_IPS_AS_USUAL", logPrivateIPsAsUsual, false)
+
+	// Build static Stats part for startup output
+	statsFields := logrus.Fields{
+		"STATS_TOKEN": statsToken != "", // never log the token itself
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(statsFields, "STATS_BIND", logsEnv, "")
 
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
@@ -1144,35 +1176,10 @@ func init() {
 			"license":     appLicense,
 			"source_code": appSource,
 		},
-		"ssh": logrus.Fields{
-			"SSHD_BIND":                   sshd_bind,
-			"SSHD_KEY_KEY":                sshd_key_key,
-			"SSHD_RATE":                   rate,
-			"SSHD_MAX_AUTH_TRIES":         maxAuthTries,
-			"SSHD_RSA_BITS":               rsaBitsStr,
-			"SSHD_PROFILE_SCOPE":          profileScope,
-			"SSHD_SEND_BANNER":            sendBanner,
-			"SSHD_LOG_CLEAR_PASSWORD":     logClearPassword,
-			"SSHD_HOST_KEY_CACHE_TTL":     hostKeyCacheTTL.String(),
-			"SSHD_HOST_KEY_CACHE_CLEANUP": hostKeyCacheCleanup.String(),
-			"USE_EXACT_RATE":              useExactRate,
-		},
-		"telnet": logrus.Fields{
-			"TELNET_BIND":               telnetBind,
-			"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
-			"TELNET_RATE":               telnetRate,
-		},
-		"stats": logrus.Fields{
-			"STATS_BIND":  statsBind,
-			"STATS_TOKEN": statsToken != "", // never log the token itself
-		},
-		"logging": logrus.Fields{
-			"LOG_TO":        logOut.Mode,
-			"LOG_FILE_PATH": logFilePath,
-			"LOG_FILTER":    logsEnv,
-
-			"LOG_PRIVATE_IPS_AS_USUAL": logPrivateIPsAsUsual,
-		},
+		"ssh":     sshFields,
+		"telnet":  telnetFields,
+		"stats":   statsFields,
+		"logging": loggingFields,
 	}
 	// Only show abuse reporting configuration when at least one backend is enabled.
 	for k, v := range abuseStartupFields {
