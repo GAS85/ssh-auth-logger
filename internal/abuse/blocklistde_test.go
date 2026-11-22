@@ -386,9 +386,9 @@ func TestNewBlocklistDeFromEnv_Defaults(t *testing.T) {
 		)
 	}
 
-	if blocklistFields["BLOCKLIST_ENABLED"] != true ||
-		blocklistFields["BLOCKLIST_SSH_SERVICE"] != "ssh-auth" {
-		t.Errorf("blocklist fields = %v", blocklistFields)
+	// Everything but ENABLED has its default value and is therefore not shown.
+	if len(blocklistFields) != 1 || blocklistFields["BLOCKLIST_ENABLED"] != true {
+		t.Errorf("only BLOCKLIST_ENABLED may be shown with defaults: %v", blocklistFields)
 	}
 
 	for k, v := range blocklistFields {
@@ -424,10 +424,14 @@ func TestNewBlocklistDeFromEnv_HashedOverridesClear(t *testing.T) {
 		)
 	}
 
-	if b.reportClearPassword ||
-		!b.reportHashedPassword ||
-		blocklistFields["BLOCKLIST_REPORT_CLEAR_PASSWORD"] != false {
-		t.Fatalf("hashed must override clear: %+v / %v", b, blocklistFields)
+	if b.reportClearPassword || !b.reportHashedPassword {
+		t.Fatalf("hashed must override clear: %+v", b)
+	}
+	// Effective values equal the defaults (false / true), so neither is shown.
+	for _, k := range []string{"BLOCKLIST_REPORT_CLEAR_PASSWORD", "BLOCKLIST_REPORT_HASHED_PASSWORD"} {
+		if _, ok := blocklistFields[k]; ok {
+			t.Errorf("%s has its default value and must not be shown: %v", k, blocklistFields)
+		}
 	}
 
 }
@@ -525,8 +529,8 @@ func TestSetup_BlocklistDeRegistered(t *testing.T) {
 		)
 	}
 
-	if abuseFields["ABUSE_REPORT_ATTEMPTS"] != 10 {
-		t.Errorf("abuse fields = %v", abuseFields)
+	if _, ok := abuseFields["ABUSE_REPORT_ATTEMPTS"]; ok {
+		t.Errorf("default ABUSE_REPORT_ATTEMPTS must not be shown: %v", abuseFields)
 	}
 
 	blocklistFields, ok := abuseFields["blocklist"].(logrus.Fields)

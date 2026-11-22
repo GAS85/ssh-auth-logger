@@ -338,21 +338,20 @@ func TestNewSpamhausFromEnv_Defaults(t *testing.T) {
 
 	// newSpamhausFromEnv() returns:
 	// map[string]any{
-	//     "spamhouse": map[string]any{...},
+	//     "spamhaus": map[string]any{...},
 	// }
 	wrapper, ok := asFields(fields)
 	if !ok {
 		t.Fatalf("fields = %T, want map[string]any", fields)
 	}
 
-	spamhausFields, ok := asFields(wrapper["spamhouse"])
+	spamhausFields, ok := asFields(wrapper["spamhaus"])
 	if !ok {
-		t.Fatalf("fields[spamhouse] = %T, want map[string]any", wrapper["spamhouse"])
+		t.Fatalf("fields[spamhaus] = %T, want map[string]any", wrapper["spamhaus"])
 	}
 
-	if spamhausFields["SPAMHAUS_ENABLED"] != true ||
-		spamhausFields["SPAMHAUS_THREAT_TYPE"] != "attack" {
-		t.Errorf("fields[spamhouse] = %v", spamhausFields)
+	if len(spamhausFields) != 1 || spamhausFields["SPAMHAUS_ENABLED"] != true {
+		t.Errorf("only SPAMHAUS_ENABLED may be shown with defaults: %v", spamhausFields)
 	}
 
 	for k, v := range spamhausFields {
@@ -367,6 +366,21 @@ func TestNewSpamhausFromEnv_ThreatTypeOverrideIsTrimmed(t *testing.T) {
 	be, _ := newSpamhausFromEnv()
 	if got := be.(*spamhausBackend).threatType; got != "bulletproof" {
 		t.Errorf("threatType = %q", got)
+	}
+}
+
+func TestNewSpamhausFromEnv_NonDefaultThreatTypeIsShown(t *testing.T) {
+	useEnv(t, "SPAMHAUS_ENABLED", "true", "SPAMHAUS_API_KEY", "k", "SPAMHAUS_THREAT_TYPE", "bulletproof")
+	_, fields := newSpamhausFromEnv()
+	sf, ok := asFields(fields["spamhaus"])
+	if !ok {
+		t.Fatalf("fields[spamhaus] = %T", fields["spamhaus"])
+	}
+	if sf["SPAMHAUS_THREAT_TYPE"] != "bulletproof" {
+		t.Errorf("non-default threat type must be shown: %v", sf)
+	}
+	if _, old := fields["spamhouse"]; old {
+		t.Error("the misspelled legacy key must be gone")
 	}
 }
 
@@ -446,7 +460,7 @@ func TestSetup_SpamhausRegistered(t *testing.T) {
 	//     "abuse": map[string]any{
 	//         "ABUSE_REPORT_ATTEMPTS": 10,
 	//         ...
-	//         "spamhouse": map[string]any{...},
+	//         "spamhaus": map[string]any{...},
 	//     },
 	// }
 	root, ok := asFields(fields)
@@ -459,20 +473,19 @@ func TestSetup_SpamhausRegistered(t *testing.T) {
 		t.Fatalf("fields[abuse] = %T, want map[string]any", root["abuse"])
 	}
 
-	if abuseFields["ABUSE_REPORT_ATTEMPTS"] != 10 {
-		t.Errorf("shared startup fields = %v", abuseFields)
+	if _, ok := abuseFields["ABUSE_REPORT_ATTEMPTS"]; ok {
+		t.Errorf("default ABUSE_REPORT_ATTEMPTS must not be shown: %v", abuseFields)
 	}
 
-	spamhausFields, ok := asFields(abuseFields["spamhouse"])
+	spamhausFields, ok := asFields(abuseFields["spamhaus"])
 	if !ok {
 		t.Fatalf(
-			"fields[abuse][spamhouse] = %T, want map[string]any",
-			abuseFields["spamhouse"],
+			"fields[abuse][spamhaus] = %T, want map[string]any",
+			abuseFields["spamhaus"],
 		)
 	}
 
-	if spamhausFields["SPAMHAUS_ENABLED"] != true ||
-		spamhausFields["SPAMHAUS_THREAT_TYPE"] != "attack" {
+	if len(spamhausFields) != 1 || spamhausFields["SPAMHAUS_ENABLED"] != true {
 		t.Errorf("backend startup fields = %v", spamhausFields)
 	}
 }

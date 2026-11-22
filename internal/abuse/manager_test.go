@@ -901,9 +901,9 @@ func TestSetup_BothBackendsAndSharedSettings(t *testing.T) {
 
 	// Shared abuse settings remain directly under "abuse".
 	if abuse["ABUSE_REPORT_ATTEMPTS"] != 7 ||
-		abuse["ABUSE_REPORT_INTERVAL"] != "20m0s" ||
-		abuse["ABUSE_CLEANUP_INTERVAL"] != "1h0m0s" ||
-		abuse["ABUSE_STATE_EXPIRY"] != "3h0m0s" {
+		abuse["ABUSE_REPORT_INTERVAL"] != "20m" ||
+		abuse["ABUSE_CLEANUP_INTERVAL"] != "1h" ||
+		abuse["ABUSE_STATE_EXPIRY"] != "3h" {
 		t.Errorf("shared startup fields wrong: %v", abuse)
 	}
 
@@ -1218,5 +1218,60 @@ func TestFlush_TimesOutInsteadOfBlockingShutdown(t *testing.T) {
 	}
 	if hook.find("flush on shutdown timed out") == nil {
 		t.Error("expected a warning that the flush timed out")
+	}
+}
+
+func TestSetup_DefaultSharedSettingsAreNotShown(t *testing.T) {
+	isolate(t)
+	m, fields := Setup(Options{Getenv: env(
+		"ABUSEIPDB_ENABLED", "true", "ABUSEIPDB_API_KEY", "k",
+		"ABUSE_REPORT_ATTEMPTS", "5",
+	)})
+	t.Cleanup(m.Stop)
+
+	sec, ok := asFields(fields["abuse"])
+	if !ok {
+		t.Fatalf("fields[abuse] = %T", fields["abuse"])
+	}
+	if sec["ABUSE_REPORT_ATTEMPTS"] != 5 {
+		t.Errorf("non-default attempts must be shown: %v", sec)
+	}
+	for _, k := range []string{"ABUSE_REPORT_INTERVAL", "ABUSE_CLEANUP_INTERVAL", "ABUSE_STATE_EXPIRY"} {
+		if _, ok := sec[k]; ok {
+			t.Errorf("default %s must not be shown", k)
+		}
+	}
+	if _, ok := sec["abuseipdb"]; !ok {
+		t.Error("backend section missing")
+	}
+}
+
+// Every backend reports under its own key: two backends must not overwrite each other's section.
+func TestSetup_EachBackendHasItsOwnStartupSection(t *testing.T) {
+	isolate(t)
+	m, fields := Setup(Options{Getenv: env(
+		"ABUSEIPDB_ENABLED", "true", "ABUSEIPDB_API_KEY", "k",
+		"DSHIELD_ENABLED", "true", "DSHIELD_USERID", "1", "DSHIELD_API_KEY", "k",
+		"OTX_ENABLED", "true", "OTX_API_KEY", "k",
+		"BLOCKLIST_ENABLED", "true", "BLOCKLIST_SERVER", "s", "BLOCKLIST_API_KEY", "k",
+		"SPAMHAUS_ENABLED", "true", "SPAMHAUS_API_KEY", "k",
+	)})
+	t.Cleanup(m.Stop)
+
+	sec, ok := asFields(fields["abuse"])
+	if !ok {
+		t.Fatalf("fields[abuse] = %T", fields["abuse"])
+	}
+	for key, enabled := range map[string]string{
+		"abuseipdb": "ABUSEIPDB_ENABLED",
+		"dshield":   "DSHIELD_ENABLED",
+		"otx":       "OTX_ENABLED",
+		"blocklist": "BLOCKLIST_ENABLED",
+		"spamhaus":  "SPAMHAUS_ENABLED",
+	} {
+		s, ok := asFields(sec[key])
+		if !ok || s[enabled] != true {
+			t.Errorf("section %q lacks %s: %v", key, enabled, sec[key])
+		}
 	}
 }

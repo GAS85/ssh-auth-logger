@@ -176,7 +176,7 @@ services:
 
       #- SSHD_RATE=450                         # bytes per second, emulate very slow connection
       #- SSHD_BIND=:2222                       # Port and interface sshd to listen
-      #- SSHD_KEY_KEY="Take me to your leader" # It's a secret key that is used to generate a deterministic hash value for a given host IP address. Random will be used if not set
+      #- SSHD_KEY_KEY=this-is-a-random-secret  # It's a secret key that is used to generate a deterministic hash value for a given host IP address. Random will be used if not set
       #- SSHD_MAX_AUTH_TRIES=6                 # The minimum number of authentication attempts allowed
       #- SSHD_RSA_BITS=3072                    # If you use 'rsa' you can also set RSA key size, 2048, 3072, 4096 (very rare)
       #- SSHD_PROFILE_SCOPE=host               # Can be 'remote_ip' (each remote IP gets its own profile, simulating per-attacker behavior.), or anything else for 'host' (the same local host always gets the same profile, e.g. binding to 0.0.0.0:22 will always select the same Profile).

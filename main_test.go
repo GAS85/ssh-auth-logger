@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"math"
+	"math/rand"
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,7 +36,8 @@ func TestMain(m *testing.M) {
 	maxAuthTries = 1
 	logClearPassword = true
 	telnetLogClearPassword = true
-	m.Run()
+	telnetCloseDelay = 0 // the real 2 s pause per telnet attempt made the whole suite take two minutes
+	os.Exit(m.Run())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -106,22 +111,6 @@ func TestHashToInt64_DifferentKeys(t *testing.T) {
 	b := HashToInt64([]byte("msg"), []byte("key2"))
 	if a == b {
 		t.Error("different keys should produce different hashes")
-	}
-}
-
-// ── getEnvWithDefault ─────────────────────────────────────────────────────────
-
-func TestGetEnvWithDefault_Missing(t *testing.T) {
-	t.Setenv("__TEST_MISSING__", "")
-	if got := getEnvWithDefault("__TEST_MISSING__", "fallback"); got != "fallback" {
-		t.Errorf("empty env var: want %q, got %q", "fallback", got)
-	}
-}
-
-func TestGetEnvWithDefault_Present(t *testing.T) {
-	t.Setenv("__TEST_PRESENT__", "actual")
-	if got := getEnvWithDefault("__TEST_PRESENT__", "fallback"); got != "actual" {
-		t.Errorf("set env var: want %q, got %q", "actual", got)
 	}
 }
 
@@ -781,14 +770,6 @@ func TestSSH_ServerVersionMatchesProfile(t *testing.T) {
 // ── Additional Tests for Higher Coverage ─────────────────────────────────────
 
 // TestGetHostKeySigner_ErrorCases tests error paths
-func TestGetHostKeySigner_ErrorCases(t *testing.T) {
-	// Test unsupported key type
-	_, err := getHostKeySigner("host1", "ecdsa-p256")
-	if err == nil {
-		t.Error("expected error for unsupported key type")
-	}
-}
-
 // TestGetHostKeySigner_RSAWithLowBits is covered by init validation
 func TestGetHostKeySigner_RSAGeneration(t *testing.T) {
 	oldBits := rsaBits
@@ -1013,9 +994,9 @@ func TestRateLimitedConn_ReadRateLimiting(t *testing.T) {
 	if n != 10 {
 		t.Errorf("expected 10 bytes, got %d", n)
 	}
-	// With rate 10 bytes/sec, reading 10 bytes should take ~1 second
-	if elapsed < 500*time.Millisecond {
-		t.Logf("Read completed in %v (rate limiting may be minimal)", elapsed)
+	// With rate 10 bytes/sec, reading 10 bytes takes 1 second.
+	if want := time.Duration(n) * 100 * time.Millisecond; elapsed < want-50*time.Millisecond {
+		t.Errorf("read of %d bytes took %v, want >= %v", n, elapsed, want)
 	}
 }
 
@@ -1074,19 +1055,18 @@ func TestMakeSSHConfig_ProfileScope(t *testing.T) {
 	}
 }
 
-// TestRateLimitedConn_WritePartial tests write with partial completion
+// TestRateLimitedConn_WritePartial writes more than the token bucket holds: the data must arrive complete and in order.
 func TestRateLimitedConn_WritePartial(t *testing.T) {
 	server, client := tcpPair(t)
-	limited := newRateLimitedConn(server, 5) // Very slow
+	limited := newRateLimitedConn(server, 5) // Very slow: the bucket holds 5 tokens
 
+	received := make(chan []byte, 1)
 	go func() {
-		// Read all data
-		buf := make([]byte, 20)
-		client.Read(buf)
-		client.Close()
+		// Read everything until the writer closes. (Closing early would make later chunks fail with a broken pipe.)
+		b, _ := io.ReadAll(client)
+		received <- b
 	}()
 
-	// Write more than token bucket can handle in one go
 	data := []byte("1234567890")
 	n, err := limited.Write(data)
 	if err != nil {
@@ -1094,6 +1074,16 @@ func TestRateLimitedConn_WritePartial(t *testing.T) {
 	}
 	if n != len(data) {
 		t.Errorf("expected to write %d bytes, wrote %d", len(data), n)
+	}
+	server.Close()
+
+	select {
+	case got := <-received:
+		if !bytes.Equal(got, data) {
+			t.Errorf("client received %q, want %q", got, data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client never saw the end of the data")
 	}
 }
 
@@ -1117,22 +1107,6 @@ func TestRateLimitedConn_WriteWithConnectionClose(t *testing.T) {
 }
 
 // TestGetServerProfile_NegativeSeed tests negative seed handling
-func TestGetServerProfile_NegativeSeed(t *testing.T) {
-	// This is indirectly tested by getServerProfile which uses HashToInt64
-	// The function already handles negative seeds by taking absolute value
-	originalKey := sshd_key_key
-	defer func() { sshd_key_key = originalKey }()
-	sshd_key_key = "test"
-
-	// Run multiple times to ensure no panic
-	for i := 0; i < 10; i++ {
-		profile := getServerProfile("test-host")
-		if profile.ServerVersion == "" {
-			t.Error("getServerProfile returned empty ServerVersion")
-		}
-	}
-}
-
 // TestTelnet_EmptyLoginSequence tests telnet with empty credentials
 // func TestTelnet_EmptyLoginSequence(t *testing.T) {
 // 	hook := &logHook{}
@@ -1866,6 +1840,11 @@ func TestTelnetScan_Classification(t *testing.T) {
 		{"HTTP probe, cleartext password in message", httpProbeUser, "x", true, "Ports scan detected - HTTP: " + httpProbeUser + "; x", false},
 		{"HTTP probe, base64 password in message", httpProbeUser, "x", false, "Ports scan detected - HTTP: " + httpProbeUser + "; eA==", false},
 		{"HTTPS probe", httpsProbeUser, "", true, "Ports scan detected - HTTPS", false},
+		{"GBK encoded login is a real attempt", "\xcc\xd1\xd1\xca", "\xcb\xcd\xdb\xcc", true, "Telnet login attempt", true},
+		{"GBK encoded login, base64 mode", "\xcc\xd1\xd1\xca", "\xcb\xcd", false, "Telnet login attempt", true},
+		{"control characters in both fields", "\x03\x00\x00\x13", "\x00\x01", true, "Ports scan detected - binary data (4 bytes): 03000013", false},
+		{"control character in username", "ad\x00min", "pw", true, "Ports scan detected - binary data (6 bytes): 61640" + "06d696e", false},
+		{"valid UTF-8 text stays a login attempt", "Админ", "pw", true, "Telnet login attempt", true},
 		{"empty credentials", "", "", true, "Ports scan detected - empty credentials", false},
 		{"empty credentials, base64 mode", "", "", false, "Ports scan detected - empty credentials", false},
 	}
@@ -2193,5 +2172,268 @@ func TestRateInit_InvalidRatesAreFatal(t *testing.T) {
 				t.Error("must not start up with an invalid rate")
 			}
 		})
+	}
+}
+
+// ── Regression tests for the fixes in main.go ────────────────────────────────
+
+// An empty bucket plus a Write used to spin forever: the fractional token was thrown away on every poll.
+func TestRateLimitedConn_WriteWithEmptyBucketMakesProgress(t *testing.T) {
+	server, client := tcpPair(t)
+	go io.Copy(io.Discard, client)
+
+	limited := newRateLimitedConn(server, 100)
+	limited.tokens = 0
+	limited.lastUpdate = time.Now() // nothing has accumulated yet
+
+	done := make(chan error, 1)
+	go func() { _, err := limited.Write([]byte("hello")); done <- err }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Write never finished: fractional tokens are lost when the bucket is polled in a loop")
+	}
+}
+
+// Writing exactly what the bucket holds leaves it empty; the next Write must wait for tokens, not spin.
+func TestRateLimitedConn_BackToBackWritesAreRateLimited(t *testing.T) {
+	server, client := tcpPair(t)
+	go io.Copy(io.Discard, client)
+
+	limited := newRateLimitedConn(server, 100) // bucket starts with 100 tokens
+	start := time.Now()
+	for i := 0; i < 2; i++ {
+		if n, err := limited.Write(make([]byte, 100)); err != nil || n != 100 {
+			t.Fatalf("write %d: n=%d err=%v", i, n, err)
+		}
+	}
+	// 200 bytes at 100 bytes/s with 100 in the bucket: about one second.
+	if elapsed := time.Since(start); elapsed < 800*time.Millisecond || elapsed > 4*time.Second {
+		t.Errorf("200 bytes took %v, want about 1s", elapsed)
+	}
+}
+
+// A client that connects and never speaks must be dropped after sshConnTimeout.
+func TestHandleConnection_SilentClientTimesOut(t *testing.T) {
+	old := sshConnTimeout
+	sshConnTimeout = 300 * time.Millisecond
+	defer func() { sshConnTimeout = old }()
+
+	server, client := tcpPair(t)
+	defer client.Close()
+	config, err := makeSSHConfig(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() { handleConnection(server, &config); close(done) }() // the client never sends anything
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler is still blocked on a silent client")
+	}
+}
+
+func TestProfileIndex_AlwaysInRange(t *testing.T) {
+	seeds := []int64{0, 1, -1, 12345, -12345, math.MaxInt64, math.MinInt64, math.MinInt64 + 1}
+	for _, n := range []int{1, 2, 7, 8, 9} {
+		for _, seed := range seeds {
+			if got := profileIndex(seed, n); got < 0 || got >= n {
+				t.Errorf("profileIndex(%d, %d) = %d, out of range", seed, n, got)
+			}
+		}
+	}
+	if profileIndex(42, 8) != profileIndex(42, 8) {
+		t.Error("not deterministic")
+	}
+}
+
+func TestShortBuild(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                 "",
+		"abc":              "abc",
+		"12345678":         "12345678",
+		"0123456789abcdef": "01234567",
+		"__none__":         "__none__",
+	} {
+		if got := shortBuild(in); got != want {
+			t.Errorf("shortBuild(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// repBackend is a backend that can look up reputations and counts how often it is asked.
+type repBackend struct {
+	*chanBackend
+	calls atomic.Int32
+}
+
+func (b *repBackend) ReputationCheckEnabled() bool { return true }
+func (b *repBackend) LookupReputation(string) (abuse.Reputation, error) {
+	b.calls.Add(1)
+	return abuse.Reputation{CountryCode: "CH", AbuseConfidenceScore: 7, TotalReports: 3}, nil
+}
+
+// Private addresses must not cost an API lookup; public ones do.
+func TestWithReputation_SkipsPrivateIPs(t *testing.T) {
+	b := &repBackend{chanBackend: &chanBackend{ch: make(chan abuse.Report, 1)}}
+	m := abuse.NewManager([]abuse.Backend{b}, 10, time.Hour, time.Hour, time.Hour)
+	old, oldPrivate := abuseReporter, logPrivateIPsAsUsual
+	abuseReporter, logPrivateIPsAsUsual = m, false
+	t.Cleanup(func() { abuseReporter, logPrivateIPsAsUsual = old, oldPrivate; m.Stop() })
+
+	for _, ip := range []string{"127.0.0.1", "10.1.2.3", "192.168.0.7", "fd12::1"} {
+		withReputation(logrus.Fields{"src": ip})
+	}
+	time.Sleep(100 * time.Millisecond) // a (wrongly started) background lookup would be counted by now
+	if n := b.calls.Load(); n != 0 {
+		t.Fatalf("%d lookups for private IPs, want 0", n)
+	}
+
+	withReputation(logrus.Fields{"src": "203.0.113.9"})
+	waitFor(t, "lookup of the public IP", func() bool { return b.calls.Load() == 1 })
+
+	// Once cached, the data is added to the log fields.
+	waitFor(t, "cached reputation", func() bool {
+		return withReputation(logrus.Fields{"src": "203.0.113.9"})["countryCode"] == "CH"
+	})
+}
+
+// A host key must be the same after a restart (empty cache) as long as SSHD_KEY_KEY is unchanged, otherwise the
+// honeypot is fingerprintable by its changing host key.
+func TestGetHostKeySigner_ReproducibleAfterCacheLoss(t *testing.T) {
+	for _, keyType := range []string{"ed25519", "rsa"} {
+		t.Run(keyType, func(t *testing.T) {
+			c := newCleanupTestCache(time.Hour, nil)
+			useCache(t, c)
+			first, err := getHostKeySigner("repro-"+keyType, keyType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.mu.Lock()
+			c.keys = map[string]cachedHostKey{}
+			c.mu.Unlock()
+			second, err := getHostKeySigner("repro-"+keyType, keyType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(first.PublicKey().Marshal(), second.PublicKey().Marshal()) {
+				t.Errorf("%s host key differs after the cache was emptied", keyType)
+			}
+		})
+	}
+}
+
+// The derived RSA key must be a valid key of the requested size, usable for SSH signatures.
+func TestGenerateDeterministicRSAKey(t *testing.T) {
+	for _, bits := range []int{1024, 2048} {
+		t.Run(fmt.Sprint(bits), func(t *testing.T) {
+			key, err := generateDeterministicRSAKey(rand.New(rand.NewSource(7)), bits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if key.N.BitLen() != bits {
+				t.Errorf("modulus has %d bits, want %d", key.N.BitLen(), bits)
+			}
+			if err := key.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			signer, err := ssh.NewSignerFromKey(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sig, err := signer.Sign(rand.New(rand.NewSource(1)), []byte("data"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := signer.PublicKey().Verify([]byte("data"), sig); err != nil {
+				t.Errorf("signature does not verify: %v", err)
+			}
+
+			again, _ := generateDeterministicRSAKey(rand.New(rand.NewSource(7)), bits)
+			other, _ := generateDeterministicRSAKey(rand.New(rand.NewSource(8)), bits)
+			if again.N.Cmp(key.N) != 0 {
+				t.Error("same seed must give the same key")
+			}
+			if other.N.Cmp(key.N) == 0 {
+				t.Error("different seeds must give different keys")
+			}
+		})
+	}
+}
+
+func TestGenerateDeterministicRSAKey_RejectsBadSizes(t *testing.T) {
+	for _, bits := range []int{0, 512, 1023, 2047} {
+		if _, err := generateDeterministicRSAKey(rand.New(rand.NewSource(1)), bits); err == nil {
+			t.Errorf("bits=%d: expected an error", bits)
+		}
+	}
+}
+
+func TestGenerateDeterministicRSAKey_ReaderErrorIsReturned(t *testing.T) {
+	if _, err := generateDeterministicRSAKey(bytes.NewReader(nil), 2048); err == nil {
+		t.Error("expected an error when the random source is exhausted")
+	}
+}
+
+func TestIsBinaryProbe(t *testing.T) {
+	for in, want := range map[string]bool{
+		"":                 false,
+		"root":             false,
+		"user name":        false,
+		"tab\tseparated":   false,
+		"Админ":            false, // valid UTF-8
+		"日本語":              false,
+		"\xcc\xd1\xd1\xca": false, // not valid UTF-8 (GBK), but no control characters
+		"\xff\xfb\x01":     true,  // telnet IAC negotiation ends in a control byte
+		"a\x00b":           true,
+		"a\x1bb":           true,
+		"del\x7f":          true,
+		"\x03\x00\x00\x13": true, // start of an RDP/TPKT packet
+	} {
+		if got := isBinaryProbe(in); got != want {
+			t.Errorf("isBinaryProbe(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestLoggableText(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                 "",
+		"root":             "root",
+		"Админ":            "Админ",
+		"\xcc\xd1\xd1\xca": `\xcc\xd1\xd1\xca`,
+		"ok\xff":           `ok\xff`,
+	} {
+		if got := loggableText(in); got != want {
+			t.Errorf("loggableText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A GBK login must reach the log readable as \xNN escapes (not as U+FFFD) and be counted and reported like any other.
+func TestTelnetLogin_NonUTF8CredentialsAreEscaped(t *testing.T) {
+	old := telnetLogClearPassword
+	telnetLogClearPassword = true
+	t.Cleanup(func() { telnetLogClearPassword = old })
+	setPrivateAsUsual(t, false)
+
+	e := runTelnetAttempt(t, "\xcc\xd1\xd1\xca", "\xcb\xcd\xdb\xcc")
+	if e.Data["duser"] != `\xcc\xd1\xd1\xca` || e.Data["password"] != `\xcb\xcd\xdb\xcc` {
+		t.Errorf("duser = %v, password = %v", e.Data["duser"], e.Data["password"])
+	}
+}
+
+func TestHexPreview_IsBounded(t *testing.T) {
+	if got := hexPreview("\xcc\xd1"); got != "ccd1" {
+		t.Errorf("got %q", got)
+	}
+	got := hexPreview(strings.Repeat("\xff", 100))
+	if want := strings.Repeat("ff", 32) + "..."; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

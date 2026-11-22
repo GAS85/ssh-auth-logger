@@ -49,8 +49,8 @@ func newBlocklistDeFromEnv() (Backend, logrus.Fields) {
 		return nil, nil
 	}
 
-	server := startup.GetEnvWithDefault("BLOCKLIST_SERVER", "")
-	apiKey := startup.GetEnvWithDefault("BLOCKLIST_API_KEY", "")
+	server := getenv("BLOCKLIST_SERVER", "")
+	apiKey := getenv("BLOCKLIST_API_KEY", "")
 	if server == "" || apiKey == "" {
 		logrus.Fatal("BLOCKLIST_ENABLED is enabled but BLOCKLIST_SERVER or BLOCKLIST_API_KEY is empty")
 	}
@@ -64,10 +64,10 @@ func newBlocklistDeFromEnv() (Backend, logrus.Fields) {
 		server: server,
 		apiKey: apiKey,
 
-		sshService: startup.GetEnvWithDefault("BLOCKLIST_SSH_SERVICE", "ssh-auth"),
+		sshService: getenv("BLOCKLIST_SSH_SERVICE", "ssh-auth"),
 		// blocklist.de has no "telnet" service in its published list. Will set one from apache
 		// https://www.blocklist.de/en/download.html#services
-		telnetService: startup.GetEnvWithDefault("BLOCKLIST_TELNET_SERVICE", "bruteforcelogin"),
+		telnetService: getenv("BLOCKLIST_TELNET_SERVICE", "bruteforcelogin"),
 
 		reportClearUsername:  clearUsername,
 		reportClearPassword:  clearPassword && !hashedPassword,

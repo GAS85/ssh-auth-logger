@@ -619,19 +619,25 @@ func TestNewAbuseIPDBFromEnv_IPCheck(t *testing.T) {
 	t.Run("off by default", func(t *testing.T) {
 		useEnv(t, "ABUSEIPDB_ENABLED", "true", "ABUSEIPDB_API_KEY", "k")
 		be, fields := newAbuseIPDBFromEnv()
-		b := be.(*abuseIPDBBackend)
+		b, ok := be.(*abuseIPDBBackend)
+		if !ok {
+			t.Fatalf("backend = %v, want *abuseIPDBBackend (is ABUSEIPDB_ENABLED visible to getenv?)", be)
+		}
 		if b.ReputationCheckEnabled() {
 			t.Error("IP check must be off by default")
 		}
-		if fields["abuseipdb"].(logrus.Fields)["ABUSEIPDB_IP_CHECK"] != false {
-			t.Errorf("startup fields = %v", fields)
+		if _, shown := fields["abuseipdb"].(logrus.Fields)["ABUSEIPDB_IP_CHECK"]; shown {
+			t.Errorf("default must not be shown: %v", fields)
 		}
 	})
 
 	t.Run("enabled", func(t *testing.T) {
 		useEnv(t, "ABUSEIPDB_ENABLED", "true", "ABUSEIPDB_API_KEY", "k", "ABUSEIPDB_IP_CHECK", "true")
 		be, fields := newAbuseIPDBFromEnv()
-		b := be.(*abuseIPDBBackend)
+		b, ok := be.(*abuseIPDBBackend)
+		if !ok {
+			t.Fatalf("backend = %v, want *abuseIPDBBackend (is ABUSEIPDB_ENABLED visible to getenv?)", be)
+		}
 		if !b.ReputationCheckEnabled() {
 			t.Error("IP check not enabled")
 		}

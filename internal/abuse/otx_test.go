@@ -558,9 +558,8 @@ func TestNewOTXFromEnv_Defaults(t *testing.T) {
 		t.Fatalf("fields[abuse][otx] = %T, want map[string]any", abuseFields["otx"])
 	}
 
-	if otxFields["OTX_BATCH_SIZE"] != 25 ||
-		otxFields["OTX_BATCH_INTERVAL"] != "1h0m0s" ||
-		otxFields["OTX_TLP"] != "white" {
+	// ENABLED and TLP are always shown, the rest has its default value.
+	if len(otxFields) != 2 || otxFields["OTX_ENABLED"] != true || otxFields["OTX_TLP"] != "white" {
 		t.Errorf("fields[abuse][otx] = %v", otxFields)
 	}
 
@@ -997,11 +996,19 @@ func TestNewOTXFromEnv_CredentialSettingsAndTLP(t *testing.T) {
 			if !ok {
 				t.Fatalf("fields[otx] = %T", fields["otx"])
 			}
-			if otxFields["OTX_REPORT_CLEAR_USERNAME"] != tc.wantUser ||
-				otxFields["OTX_REPORT_CLEAR_PASSWORD"] != tc.wantClear ||
-				otxFields["OTX_REPORT_HASHED_PASSWORD"] != tc.wantHash ||
-				otxFields["OTX_TLP"] != tc.wantTLP {
-				t.Errorf("startup fields must show the effective settings: %v", otxFields)
+			if otxFields["OTX_TLP"] != tc.wantTLP {
+				t.Errorf("OTX_TLP must always be shown with its effective value: %v", otxFields)
+			}
+			// The report flags default to false: shown only when effectively enabled.
+			for k, want := range map[string]bool{
+				"OTX_REPORT_CLEAR_USERNAME":  tc.wantUser,
+				"OTX_REPORT_CLEAR_PASSWORD":  tc.wantClear,
+				"OTX_REPORT_HASHED_PASSWORD": tc.wantHash,
+			} {
+				v, shown := otxFields[k]
+				if shown != want || (shown && v != true) {
+					t.Errorf("%s: shown=%v value=%v, want shown=%v: %v", k, shown, v, want, otxFields)
+				}
 			}
 		})
 	}
