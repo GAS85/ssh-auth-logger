@@ -114,17 +114,17 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 		return nil, nil
 	}
 
-	apiKey := startup.GetEnvWithDefault("OTX_API_KEY", "")
+	apiKey := getenv("OTX_API_KEY", "")
 	if apiKey == "" {
 		logrus.Fatal("OTX_ENABLED is enabled but OTX_API_KEY is empty")
 	}
 
-	batchSize, err := strconv.Atoi(startup.GetEnvWithDefault("OTX_BATCH_SIZE", "25"))
+	batchSize, err := strconv.Atoi(getenv("OTX_BATCH_SIZE", "25"))
 	if err != nil || batchSize <= 0 {
 		logrus.Fatal("Invalid OTX_BATCH_SIZE environment variable")
 	}
 
-	flushEveryStr := startup.GetEnvWithDefault("OTX_BATCH_INTERVAL", "1h")
+	flushEveryStr := getenv("OTX_BATCH_INTERVAL", "1h")
 	flushEvery, err := time.ParseDuration(flushEveryStr)
 	if err != nil || flushEvery <= 0 {
 		logrus.Fatal("Invalid OTX_BATCH_INTERVAL environment variable")
@@ -141,7 +141,7 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 	//   nothing shared:                   white (default) or higher
 	//   usernames / hashed passwords:     not white; green is the default
 	//   cleartext passwords:              red only
-	tlp := strings.ToLower(startup.GetEnvWithDefault("OTX_TLP", ""))
+	tlp := strings.ToLower(getenv("OTX_TLP", ""))
 	if tlp == "" {
 		switch {
 		case clearPassword:
@@ -169,7 +169,7 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 	}
 
 	var tags []string
-	for _, t := range strings.Split(startup.GetEnvWithDefault("OTX_TAGS", "honeypot,ssh,telnet,brute-force"), ",") {
+	for _, t := range strings.Split(getenv("OTX_TAGS", "honeypot,ssh,telnet,brute-force"), ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			tags = appendUnique(tags, t)
 		}
@@ -179,13 +179,13 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 		apiKey:  apiKey,
 		baseURL: otxDefaultBaseURL,
 
-		pulseName: startup.GetEnvWithDefault("OTX_PULSE_NAME", otxDefaultPulseName),
-		pulseID:   startup.GetEnvWithDefault("OTX_PULSE_ID", ""),
+		pulseName: getenv("OTX_PULSE_NAME", otxDefaultPulseName),
+		pulseID:   getenv("OTX_PULSE_ID", ""),
 		public:    public,
 		tlp:       tlp,
 		tags:      tags,
 		// Optional OTX indicator role (e.g. "scanning_host"). An unknown role is rejected by the API.
-		role: startup.GetEnvWithDefault("OTX_INDICATOR_ROLE", "bruteforce"),
+		role: getenv("OTX_INDICATOR_ROLE", "bruteforce"),
 
 		reportClearUsername:  clearUsername,
 		reportClearPassword:  clearPassword,
@@ -223,7 +223,7 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 	startup.AddIfNotDefault(otxFields, "OTX_REPORT_HASHED_PASSWORD", b.reportHashedPassword, false)
 
 	return b, logrus.Fields{
-		"abuseipdb": otxFields,
+		"otx": otxFields,
 	}
 }
 

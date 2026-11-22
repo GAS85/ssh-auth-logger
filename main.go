@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"math/rand"
 	"net"
 	"os"
@@ -35,6 +37,9 @@ const (
 
 	// shutdownFlushTimeout bounds how long SIGTERM/SIGINT waits for batching abuse backends to send their queue. It stays below the 10s that Docker and systemd give a container or service before killing it.
 	shutdownFlushTimeout = 8 * time.Second
+
+	// acceptRetryDelay is the pause after a failed Accept, so a persistent error (EMFILE) does not spin the CPU.
+	acceptRetryDelay = 100 * time.Millisecond
 
 	// Limits for reading a telnet line from an untrusted client.
 	// A client can stream bytes with no newline and grow result without limit, and idle connections hold a goroutine forever.
@@ -184,7 +189,8 @@ func resolveProfileKey(scope string, conn net.Conn) string {
 
 // withReputation adds the cached IP reputation (countryCode, abuseConfidenceScore, totalReports) of the source IP to fields. It never blocks: on first sight of an IP, or if the data is not available, nothing is added.
 func withReputation(fields logrus.Fields) logrus.Fields {
-	if src, ok := fields["src"].(string); ok {
+	// Private addresses are never looked up: it would only cost API quota.
+	if src, ok := fields["src"].(string); ok && reportableIP(src) {
 		for k, v := range abuseReporter.ReputationFields(src) {
 			fields[k] = v
 		}
@@ -405,36 +411,32 @@ func (r *rateLimitedConn) Write(p []byte) (n int, err error) {
 func (r *rateLimitedConn) limitWrite(p []byte) (int, error) {
 	var totalWritten int
 	for len(p) > 0 {
-		// Calculate available tokens.
+		// Add the tokens earned since the last update. Only the time those whole tokens account for is
+		// consumed, the fraction stays: with a coarse poll the fractional part must not be thrown away, or an
+		// empty bucket would never refill and this loop would spin forever.
 		now := time.Now()
-		elapsed := now.Sub(r.lastUpdate).Seconds()
-		r.tokens += int(elapsed * float64(r.rate))
-		if r.tokens > r.bufferSize {
-			r.tokens = r.bufferSize
-		}
-		r.lastUpdate = now
-
-		// Determine how many bytes we can write.
-		availableTokens := r.tokens
-		if availableTokens > len(p) {
-			availableTokens = len(p)
+		if add := int(now.Sub(r.lastUpdate).Seconds() * float64(r.rate)); add > 0 {
+			r.tokens += add
+			if r.tokens >= r.bufferSize {
+				r.tokens, r.lastUpdate = r.bufferSize, now
+			} else {
+				r.lastUpdate = r.lastUpdate.Add(time.Duration(float64(add) / float64(r.rate) * float64(time.Second)))
+			}
 		}
 
-		// Write data.
-		n, err := r.Conn.Write(p[:availableTokens])
+		// Nothing to spend yet: wait for one token instead of busy-looping.
+		if r.tokens <= 0 {
+			time.Sleep(time.Second / time.Duration(r.rate))
+			continue
+		}
+
+		n, err := r.Conn.Write(p[:min(r.tokens, len(p))])
 		totalWritten += n
 		r.tokens -= n
 		if err != nil {
 			return totalWritten, err
 		}
-
-		// Adjust the buffer.
 		p = p[n:]
-
-		// If there are still bytes to write, sleep to accumulate tokens.
-		if len(p) > 0 {
-			time.Sleep(time.Duration(availableTokens) * time.Second / time.Duration(r.rate))
-		}
 	}
 	return totalWritten, nil
 }
@@ -528,8 +530,9 @@ func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
 		}
 
 	case "rsa":
-		// Using rng heir is cheaper as crypto/rand, as honeypot it is ok
-		key, err := rsa.GenerateKey(rng, rsaBits)
+		// rsa.GenerateKey mixes in extra randomness even for a seeded reader, so its keys are not reproducible.
+		// A host key that changes after a restart makes the honeypot easy to fingerprint, so derive it ourselves.
+		key, err := generateDeterministicRSAKey(rng, rsaBits)
 		if err != nil {
 			return nil, err
 		}
@@ -561,6 +564,69 @@ func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
 	hostKeys.mu.Unlock()
 
 	return signer, nil
+}
+
+// generateDeterministicRSAKey builds an RSA key whose primes are taken from r, so the same stream always gives the same key. Only for a honeypot host key: the randomness is a seeded PRNG, never use it for keys that protect anything.
+func generateDeterministicRSAKey(r io.Reader, bits int) (*rsa.PrivateKey, error) {
+	if bits < 1024 || bits%2 != 0 {
+		return nil, fmt.Errorf("unsupported RSA key size %d", bits)
+	}
+	e := big.NewInt(65537)
+
+	prime := func() (*big.Int, error) {
+		buf := make([]byte, bits/16)
+		for {
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return nil, err
+			}
+			// Top two bits set: the product of two such primes has exactly `bits` bits. Low bit set: odd.
+			buf[0] |= 0xC0
+			buf[len(buf)-1] |= 1
+			p := new(big.Int).SetBytes(buf)
+			if !p.ProbablyPrime(20) {
+				continue
+			}
+			// e must be invertible modulo p-1.
+			pm1 := new(big.Int).Sub(p, big.NewInt(1))
+			if new(big.Int).GCD(nil, nil, e, pm1).Cmp(big.NewInt(1)) != 0 {
+				continue
+			}
+			return p, nil
+		}
+	}
+
+	for {
+		p, err := prime()
+		if err != nil {
+			return nil, err
+		}
+		q, err := prime()
+		if err != nil {
+			return nil, err
+		}
+		if p.Cmp(q) == 0 {
+			continue
+		}
+		n := new(big.Int).Mul(p, q)
+		if n.BitLen() != bits {
+			continue
+		}
+		phi := new(big.Int).Mul(new(big.Int).Sub(p, big.NewInt(1)), new(big.Int).Sub(q, big.NewInt(1)))
+		d := new(big.Int).ModInverse(e, phi)
+		if d == nil {
+			continue
+		}
+		key := &rsa.PrivateKey{
+			PublicKey: rsa.PublicKey{N: n, E: int(e.Int64())},
+			D:         d,
+			Primes:    []*big.Int{p, q},
+		}
+		if err := key.Validate(); err != nil {
+			return nil, err
+		}
+		key.Precompute()
+		return key, nil
+	}
 }
 
 var serverProfiles = []serverProfile{
@@ -803,14 +869,15 @@ func getServerProfile(host string) serverProfile {
 		}
 	}
 	// Create a deterministic seed from "profile:" plus host, computes an HMAC-SHA256 and interprets its first eight bytes as an int64.
-	// One edge case: negating the minimum int64 value overflows and leaves it negative, which can produce an invalid index.
 	// Index selects the profile at that position in the slice’s declared order.
 	// Selection is deterministic for the same host, key, and list order.
 	seed := HashToInt64([]byte("profile:"+host), []byte(sshd_key_key))
-	if seed < 0 {
-		seed = -seed
-	}
-	return serverProfiles[int(seed)%len(serverProfiles)]
+	return serverProfiles[profileIndex(seed, len(serverProfiles))]
+}
+
+// profileIndex maps a seed to an index in [0, n). It works on the unsigned value, so negative seeds,including math.MinInt64 (which cannot be negated), always give a valid index.
+func profileIndex(seed int64, n int) int {
+	return int(uint64(seed) % uint64(n))
 }
 
 func makeSSHConfig(conn net.Conn) (ssh.ServerConfig, error) {
@@ -976,6 +1043,10 @@ func serveSSHConn(conn net.Conn) {
 	}()
 }
 
+// sshConnTimeout bounds the whole SSH handshake and authentication phase. Without it a client that connects and then
+// stays silent would hold a goroutine, a socket and a host key forever. Variable so tests can shorten it.
+var sshConnTimeout = 2 * time.Minute
+
 func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	// Random early disconnect (~10%)
 	if rand.Intn(10) == 0 {
@@ -991,15 +1062,15 @@ func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	// Simulate OpenSSH banner timing
 	time.Sleep(time.Duration(20+rand.Intn(120)) * time.Millisecond)
 
+	_ = conn.SetDeadline(time.Now().Add(sshConnTimeout))
+
 	_, _, _, err := ssh.NewServerConn(conn, config)
 	if err == nil {
-		// This should never happen because auth never succeeds
-		logrus.Panic("Successful login? why!?")
+		// This should never happen because auth never succeeds. Do not panic: this runs in a connection goroutine and would take the whole honeypot down.
+		logger.WithFields(connLogParameters(conn)).Error("Successful login? why!?")
+		conn.Close()
 	}
-	// if err != nil {
-	// 	// Auth failed or client closed connection — expected behavior
-	// 	return
-	// }
+	// err != nil: auth failed, the client left or the deadline passed. Expected behavior.
 }
 
 func init() {
@@ -1067,16 +1138,12 @@ func init() {
 
 	rsaBitsStr := startup.GetEnvWithDefault("SSHD_RSA_BITS", "3072")
 	rsaBits, err = strconv.Atoi(rsaBitsStr)
-	if err != nil || rsaBits < 2048 {
-		logrus.Fatal("Invalid SSHD_RSA_BITS (must be >= 2048)")
+	if err != nil || rsaBits < 2048 || rsaBits%2 != 0 {
+		logrus.Fatal("Invalid SSHD_RSA_BITS (must be an even number >= 2048)")
 	}
 
 	// Please refer to resolveProfileKey description
 	profileScope = startup.GetEnvWithDefault("SSHD_PROFILE_SCOPE", "host")
-
-	// Seed for non-deterministic uses to avoid identical timing patterns across restarts
-	// Fine for delays and banner selection — no security issue.
-	rand.Seed(time.Now().UnixNano())
 
 	// Banner sending option
 	sendBannerStr := startup.GetEnvWithDefault("SSHD_SEND_BANNER", "false")
@@ -1156,7 +1223,10 @@ func init() {
 		"LOG_TO": logOut.Mode,
 	}
 	// Only displayed when different from defaults
-	startup.AddIfNotDefault(loggingFields, "LOG_FILE_PATH", logFilePath, "")
+	if logOut.Mode != common.LogToConsole {
+		// The path only matters when a file is used. Its default is not "", so it cannot go through AddIfNotDefault.
+		loggingFields["LOG_FILE_PATH"] = logFilePath
+	}
 	startup.AddIfNotDefault(loggingFields, "LOG_FILTER", logsEnv, "")
 	startup.AddIfNotDefault(loggingFields, "LOG_PRIVATE_IPS_AS_USUAL", logPrivateIPsAsUsual, false)
 
@@ -1165,13 +1235,13 @@ func init() {
 		"STATS_TOKEN": statsToken != "", // never log the token itself
 	}
 	// Only displayed when different from defaults
-	startup.AddIfNotDefault(statsFields, "STATS_BIND", logsEnv, "")
+	startup.AddIfNotDefault(statsFields, "STATS_BIND", statsBind, "")
 
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
 		"app": logrus.Fields{
 			"version":     appVersion,
-			"build":       appBuild[:8],
+			"build":       shortBuild(appBuild),
 			"name":        appName,
 			"license":     appLicense,
 			"source_code": appSource,
@@ -1193,6 +1263,9 @@ func init() {
 	// Configure allowed log fields from environment variable
 	if logsEnv != "" {
 		allowedLogFields = common.ParseAllowedFields(logsEnv)
+		if len(allowedLogFields) == 0 {
+			logrus.Warn("LOG_FILTER has no usable field names; no structured fields will be logged")
+		}
 		logrus.SetFormatter(&common.FilteredJSONFormatter{
 			Allowed: allowedLogFields,
 			Base: &logrus.JSONFormatter{
@@ -1200,14 +1273,14 @@ func init() {
 			},
 		})
 	}
+}
 
-	logsEnv, isSet := os.LookupEnv("LOG_FILTER")
-	if isSet {
-		allowedLogFields = common.ParseAllowedFields(logsEnv)
-		if len(allowedLogFields) == 0 {
-			logrus.Warn("LOG_FILTER is set but empty; no structured fields will be logged")
-		}
+// shortBuild returns the first 8 characters of the build id (a commit hash), or all of it if it is shorter.
+func shortBuild(build string) string {
+	if len(build) > 8 {
+		return build[:8]
 	}
+	return build
 }
 
 func main() {
@@ -1226,13 +1299,17 @@ func main() {
 	go func() {
 		socket, err := net.Listen("tcp", sshd_bind)
 		if err != nil {
-			panic(err)
+			logrus.WithError(err).Fatalf("Cannot listen for SSH on %s", sshd_bind)
 		}
 		// logrus.Infof("SSH listening on %s", sshd_bind)
 		for {
 			conn, err := socket.Accept()
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
 				logrus.WithError(err).Warn("SSH listener accept failed")
+				time.Sleep(acceptRetryDelay) // e.g. out of file descriptors: do not spin and flood the log
 				continue
 			}
 
@@ -1244,13 +1321,17 @@ func main() {
 	go func() {
 		telnetSocket, err := net.Listen("tcp", telnetBind)
 		if err != nil {
-			panic(err)
+			logrus.WithError(err).Fatalf("Cannot listen for Telnet on %s", telnetBind)
 		}
 		// logrus.Infof("Telnet listening on %s", telnetBind)
 		for {
 			conn, err := telnetSocket.Accept()
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
 				logrus.WithError(err).Warn("Telnet listener accept failed")
+				time.Sleep(acceptRetryDelay)
 				continue
 			}
 			go handleTelnetConnection(conn)

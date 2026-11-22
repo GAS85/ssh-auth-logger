@@ -79,18 +79,18 @@ func newDShieldFromEnv() (Backend, logrus.Fields) {
 		return nil, nil
 	}
 
-	userID := startup.GetEnvWithDefault("DSHIELD_USERID", "")
-	apiKey := startup.GetEnvWithDefault("DSHIELD_API_KEY", "")
+	userID := getenv("DSHIELD_USERID", "")
+	apiKey := getenv("DSHIELD_API_KEY", "")
 	if userID == "" || apiKey == "" {
 		logrus.Fatal("DSHIELD_ENABLED is enabled but DSHIELD_USERID or DSHIELD_API_KEY is empty")
 	}
 
-	batchSize, err := strconv.Atoi(startup.GetEnvWithDefault("DSHIELD_BATCH_SIZE", "50"))
+	batchSize, err := strconv.Atoi(getenv("DSHIELD_BATCH_SIZE", "50"))
 	if err != nil || batchSize <= 0 {
 		logrus.Fatal("Invalid DSHIELD_BATCH_SIZE environment variable")
 	}
 
-	flushEveryStr := startup.GetEnvWithDefault("DSHIELD_BATCH_INTERVAL", "10m")
+	flushEveryStr := getenv("DSHIELD_BATCH_INTERVAL", "10m")
 	flushEvery, err := time.ParseDuration(flushEveryStr)
 	if err != nil || flushEvery <= 0 {
 		logrus.Fatal("Invalid DSHIELD_BATCH_INTERVAL environment variable")
@@ -145,7 +145,7 @@ func newDShieldFromEnv() (Backend, logrus.Fields) {
 	startup.AddIfNotDefault(dshieldFields, "DSHIELD_DEBUG", b.debug, false)
 
 	return b, logrus.Fields{
-		"abuseipdb": dshieldFields,
+		"dshield": dshieldFields,
 	}
 }
 

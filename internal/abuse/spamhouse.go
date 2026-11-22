@@ -50,7 +50,7 @@ func newSpamhausFromEnv() (Backend, logrus.Fields) {
 		return nil, nil
 	}
 
-	apiKey := startup.GetEnvWithDefault("SPAMHAUS_API_KEY", "")
+	apiKey := getenv("SPAMHAUS_API_KEY", "")
 	if apiKey == "" {
 		logrus.Fatal("SPAMHAUS_ENABLED is enabled but SPAMHAUS_API_KEY is empty")
 	}
@@ -58,7 +58,7 @@ func newSpamhausFromEnv() (Backend, logrus.Fields) {
 	b := &spamhausBackend{
 		apiKey: apiKey,
 		// Valid codes can be listed with GET /portal/api/v1/lookup/threats-types
-		threatType: strings.TrimSpace(startup.GetEnvWithDefault("SPAMHAUS_THREAT_TYPE", "attack")),
+		threatType: strings.TrimSpace(getenv("SPAMHAUS_THREAT_TYPE", "attack")),
 
 		endpoint: spamhausDefaultURL,
 		httpClient: &http.Client{
@@ -69,14 +69,14 @@ func newSpamhausFromEnv() (Backend, logrus.Fields) {
 	}
 
 	// Build static part for startup output
-	spamhouseFields := logrus.Fields{
+	spamhausFields := logrus.Fields{
 		"SPAMHAUS_ENABLED": true,
 	}
 	// Only displayed when different from defaults
-	startup.AddIfNotDefault(spamhouseFields, "SPAMHAUS_THREAT_TYPE", b.threatType, "attack")
+	startup.AddIfNotDefault(spamhausFields, "SPAMHAUS_THREAT_TYPE", b.threatType, "attack")
 
 	return b, logrus.Fields{
-		"spamhouse": spamhouseFields,
+		"spamhaus": spamhausFields,
 	}
 }
 
