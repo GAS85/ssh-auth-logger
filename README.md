@@ -151,7 +151,7 @@ ssh user@localhost -p 2222 -o StrictHostKeyChecking=no -o PubkeyAuthentication=n
 
 ### Run with Docker compose
 
-Docker compose example with variables:
+Docker compose example with variables, refer to the [`.env`](.env) file a full list:
 
 ```yaml
 # Create isolated network

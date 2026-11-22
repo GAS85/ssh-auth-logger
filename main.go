@@ -222,6 +222,9 @@ func reportableIP(ip string) bool {
 }
 
 // Telnet handler
+// telnetCloseDelay is how long a telnet connection is kept open after the login attempt, so that a client sees the same slow "wrong password" behavior as with a real login. Variable so tests do not have to wait for it.
+var telnetCloseDelay = 2 * time.Second
+
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
 
@@ -297,7 +300,7 @@ func handleTelnetConnection(conn net.Conn) {
 		}
 	}
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(telnetCloseDelay)
 	limitedConn.Write([]byte("\r\nLogin incorrect\r\n"))
 }
 
@@ -344,7 +347,8 @@ func isHttpsProtocolProbe(username string) bool {
 
 // isBinaryProbe reports whether username contains control characters (tab excepted). A person typing a login name never produces those, so it is the start of some other (binary) protocol sent to the telnet port, e.g. telnet option negotiation or a NUL-padded handshake. Bytes >= 0x80 are deliberately not a criterion: a legacy encoding such as GBK is not valid UTF-8 but is a real login attempt, see loggableText.
 // Can be tested locally with:
-//   (printf '\003\000\000\023\r\n\r\n'; sleep 3) | nc localhost 2323
+//
+//	(printf '\003\000\000\023\r\n\r\n'; sleep 3) | nc localhost 2323
 func isBinaryProbe(username string) bool {
 	for i := 0; i < len(username); i++ {
 		if c := username[i]; c < 0x20 && c != '\t' || c == 0x7f {
@@ -356,7 +360,8 @@ func isBinaryProbe(username string) bool {
 
 // loggableText returns s unchanged if it is valid UTF-8. Otherwise the bytes are shown as \xNN escapes (for example a GBK encoded name): the JSON log encoder would replace invalid bytes with U+FFFD and lose the data.
 // Can be tested locally with:
-//   (printf '\314\321\321\312\r\n\313\315\333\314\r\n'; sleep 3) | nc localhost 2323
+//
+//	(printf '\314\321\321\312\r\n\313\315\333\314\r\n'; sleep 3) | nc localhost 2323
 func loggableText(s string) string {
 	if utf8.ValidString(s) {
 		return s
