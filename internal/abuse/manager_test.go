@@ -779,7 +779,8 @@ func TestCleanup_DoesNotReportBelowMinimumAttempts(t *testing.T) {
 // 	f.expectNone(t)
 // }
 
-func TestCleanup_DoesNotReportAnIPThatWasReportedBefore(t *testing.T) {
+// While the IP is still inside its cooldown the expiry report must not be sent, the service would reject it.
+func TestCleanup_DoesNotReportAnIPInCooldown(t *testing.T) {
 	f := newFake("A")
 	m := newTestManager(2, f)
 	ip := "192.0.2.103"
@@ -790,7 +791,7 @@ func TestCleanup_DoesNotReportAnIPThatWasReportedBefore(t *testing.T) {
 	}
 	f.next(t)
 
-	// More attempts after the cooldown, still below the threshold.
+	// Leftover attempts, but the cooldown (1h) has not elapsed.
 	m.mu.Lock()
 	m.ips[ip].attempts = abuseMinimumAttempts
 	m.mu.Unlock()
@@ -1273,5 +1274,185 @@ func TestSetup_EachBackendHasItsOwnStartupSection(t *testing.T) {
 		if !ok || s[enabled] != true {
 			t.Errorf("section %q lacks %s: %v", key, enabled, sec[key])
 		}
+	}
+}
+
+// ── Exempt Test ─────────────────────────────────────────────────────────────────
+
+// exemptFake is a fake backend that ignores the per-IP cooldown, like DShield.
+type exemptFake struct{ *fakeBackend }
+
+func (exemptFake) IgnoresIPCooldown() bool { return true }
+
+var (
+	_ CooldownExempt = exemptFake{}
+	_ CooldownExempt = (*dshieldBackend)(nil)
+)
+
+func TestDShield_IgnoresIPCooldown(t *testing.T) {
+	if !newDShieldForTest("http://127.0.0.1:1").IgnoresIPCooldown() {
+		t.Error("DShield must ignore the per-IP cooldown")
+	}
+}
+
+// Backends that are subject to the cooldown (A) wait, exempt ones (E) keep getting every window.
+func TestCooldownExempt_NotHeldBackByCooldown(t *testing.T) {
+	a, e := newFake("A"), exemptFake{newFake("E")}
+	m := stoppable(t, newTestManager(2, a, e))
+	ip := "192.0.2.150"
+
+	m.RecordFailure(ip, "SSH", "u1", "p")
+	if !m.RecordFailure(ip, "SSH", "u2", "p") {
+		t.Fatal("expected first report")
+	}
+	if r := a.next(t); len(r.Creds) != 2 {
+		t.Errorf("A first report: %d creds, want 2", len(r.Creds))
+	}
+	if r := e.next(t); len(r.Creds) != 2 {
+		t.Errorf("E first report: %d creds, want 2", len(r.Creds))
+	}
+
+	// Inside A's cooldown: E gets the next window, A does not.
+	m.RecordFailure(ip, "SSH", "u3", "p")
+	if !m.RecordFailure(ip, "SSH", "u4", "p") {
+		t.Fatal("exempt backend must be reported during the cooldown")
+	}
+	r := e.next(t)
+	if len(r.Creds) != 2 || r.Creds[0].Username != "u3" || r.Creds[1].Username != "u4" {
+		t.Errorf("E second report = %+v, want exactly u3,u4", r.Creds)
+	}
+	a.expectNone(t)
+
+	// A keeps collecting for its next report, E's window was reset.
+	_, _, creds, _ := snapshot(m, ip)
+	if len(creds[0]) != 2 || len(creds[1]) != 0 {
+		t.Errorf("windows after second report: A=%d (want 2) E=%d (want 0)", len(creds[0]), len(creds[1]))
+	}
+
+	st := m.Stats()
+	if st.ReportsTriggered != 2 || st.SentByBackend["A"] != 1 || st.SentByBackend["E"] != 2 || st.ReportsSent != 3 {
+		t.Errorf("stats = %+v, want triggered 2, A 1, E 2, sent 3", st)
+	}
+
+	// Once the cooldown is over, A gets everything collected meanwhile.
+	m.mu.Lock()
+	m.ips[ip].lastReported = time.Now().Add(-2 * time.Hour)
+	m.mu.Unlock()
+	m.RecordFailure(ip, "SSH", "u5", "p")
+	if !m.RecordFailure(ip, "SSH", "u6", "p") {
+		t.Fatal("expected report after cooldown")
+	}
+	if r := a.next(t); len(r.Creds) != 4 { // u3,u4 from the cooldown + u5,u6
+		t.Errorf("A report after cooldown: %d creds, want 4", len(r.Creds))
+	}
+	e.next(t)
+}
+
+// The scenario from the review: threshold 10, 50 attempts, DShield must see all of them.
+func TestCooldownExempt_AllAttemptsReachExemptBackend(t *testing.T) {
+	e := exemptFake{newFake("E")}
+	m := stoppable(t, newTestManager(10, e))
+
+	total := 0
+	for i := 0; i < 50; i++ {
+		m.RecordFailure("192.0.2.151", "SSH", "root", fmt.Sprintf("pw%d", i))
+	}
+	for i := 0; i < 5; i++ {
+		total += len(e.next(t).Creds)
+	}
+	e.expectNone(t)
+	if total != 50 {
+		t.Errorf("exempt backend received %d credentials, want 50", total)
+	}
+}
+
+func TestCooldownExempt_OnlyExemptBackendsNeverSetCooldown(t *testing.T) {
+	e := exemptFake{newFake("E")}
+	m := stoppable(t, newTestManager(1, e))
+	m.RecordFailure("192.0.2.152", "SSH", "a", "b")
+	e.next(t)
+	if _, last, _, _ := snapshot(m, "192.0.2.152"); !last.IsZero() {
+		t.Errorf("lastReported = %v, want zero without cooldown backends", last)
+	}
+}
+
+// Expiry: an IP that was reported before but has leftover attempts is reported once its cooldown is over.
+func TestCleanup_ReportsLeftoverAttemptsOfPreviouslyReportedIP(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(4, f) // minAttempts = 3
+	ip := "192.0.2.153"
+
+	for i := 0; i < 4; i++ {
+		m.RecordFailure(ip, "SSH", fmt.Sprintf("u%d", i), "p")
+	}
+	f.next(t)
+
+	m.mu.Lock()
+	m.ips[ip].lastReported = time.Now().Add(-2 * time.Hour) // cooldown over
+	m.mu.Unlock()
+	for i := 0; i < abuseMinimumAttempts; i++ {
+		m.RecordFailure(ip, "SSH", fmt.Sprintf("late%d", i), "p")
+	}
+	f.expectNone(t) // below the threshold of 4
+
+	ageOut(m, ip)
+	m.cleanup()
+
+	if r := f.next(t); len(r.Creds) != abuseMinimumAttempts {
+		t.Errorf("leftover report has %d creds, want %d", len(r.Creds), abuseMinimumAttempts)
+	}
+	f.expectNone(t)
+}
+
+// Non-exempt backends are skipped while the cooldown runs (the service would reject the report); exempt ones are not.
+func TestFlush_SkipsCooldownBackendsButNotExemptOnes(t *testing.T) {
+	a, e := newFake("A"), exemptFake{newFake("E")}
+	m := stoppable(t, newTestManager(4, a, e))
+	ip := "192.0.2.154"
+
+	for i := 0; i < 4; i++ {
+		m.RecordFailure(ip, "SSH", fmt.Sprintf("u%d", i), "p")
+	}
+	a.next(t)
+	e.next(t)
+
+	// Leftovers: E counts them (no cooldown). A's counter is paused, so force the case the guard is for.
+	for i := 0; i < abuseMinimumAttempts; i++ {
+		m.RecordFailure(ip, "SSH", fmt.Sprintf("x%d", i), "p")
+	}
+	m.mu.Lock()
+	m.ips[ip].attempts = abuseMinimumAttempts // still inside A's cooldown
+	m.mu.Unlock()
+
+	m.Flush(time.Second)
+
+	if r := e.next(t); len(r.Creds) != abuseMinimumAttempts {
+		t.Errorf("E leftover report has %d creds, want %d", len(r.Creds), abuseMinimumAttempts)
+	}
+	a.expectNone(t)
+}
+
+func TestCleanup_ExemptLeftoversIgnoreCooldownAndPriorReport(t *testing.T) {
+	hook := captureLogs(t)
+	e := exemptFake{newFake("E")}
+	m := newTestManager(10, e)
+	ip := "192.0.2.155"
+
+	for i := 0; i < 10+abuseMinimumAttempts; i++ {
+		m.RecordFailure(ip, "Telnet", "root", fmt.Sprintf("p%d", i))
+	}
+	if r := e.next(t); len(r.Creds) != 10 {
+		t.Fatalf("regular report has %d creds, want 10", len(r.Creds))
+	}
+
+	ageOut(m, ip)
+	m.cleanup()
+
+	r := e.next(t)
+	if len(r.Creds) != abuseMinimumAttempts || r.Protocol != "Telnet" {
+		t.Errorf("leftover report = %+v", r)
+	}
+	if ent := hook.find("state of " + ip + " with enough attempts"); ent == nil || ent.Data["backends"] != "E" {
+		t.Errorf("log entry = %+v, want backends=E", ent)
 	}
 }

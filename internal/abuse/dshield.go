@@ -151,6 +151,9 @@ func newDShieldFromEnv() (Backend, logrus.Fields) {
 
 func (b *dshieldBackend) Name() string { return "DShield" }
 
+// IgnoresIPCooldown implements CooldownExempt: DShield takes log lines in batches and has no per-IP rate limit, so the ABUSE_REPORT_INTERVAL cooldown must not delay its credentials.
+func (b *dshieldBackend) IgnoresIPCooldown() bool { return true }
+
 // Sanitize keeps usernames / passwords only if explicitly enabled.
 func (b *dshieldBackend) Sanitize(username, password string) (string, string) {
 	if !b.reportClearUsername {
