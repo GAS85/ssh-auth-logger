@@ -100,6 +100,9 @@ func newBlocklistDeFromEnv() (Backend, logrus.Fields) {
 
 func (b *blocklistDeBackend) Name() string { return "blocklist.de" }
 
+// ReportsPublicKeys implements PublicKeyReporter: public keys are public, so their fingerprints are always included in the logs, as for AbuseIPDB. A client that only offers keys has no username or password worth sending, the fingerprint is then the actual evidence of the attempt.
+func (b *blocklistDeBackend) ReportsPublicKeys() bool { return true }
+
 // Sanitize keeps usernames / passwords only if explicitly enabled.
 // Hashed passwords are cut to the first 8 symbols (same as the other backends).
 func (b *blocklistDeBackend) Sanitize(username, password string) (string, string) {
@@ -127,7 +130,7 @@ func (b *blocklistDeBackend) serviceFor(protocol string) string {
 	return b.sshService
 }
 
-// buildLogs renders the collected attempts as log lines. Attacker-controlled values are quoted with %q, so a username containing a newline cannot forge additional log lines. Output is capped at blocklistDeMaxLogsLen bytes, whole lines only.
+// buildLogs renders the collected attempts as log lines (the API rejects an empty or very short "logs" field, so there is always at least one full line). Attacker-controlled values are quoted with %q, so a username containing a newline cannot forge additional log lines. Output is capped at blocklistDeMaxLogsLen bytes, whole lines only.
 func (b *blocklistDeBackend) buildLogs(rep Report) string {
 	creds := rep.Creds
 	if len(creds) == 0 {
@@ -148,6 +151,9 @@ func (b *blocklistDeBackend) buildLogs(rep Report) string {
 				label = "password_sha1_prefix"
 			}
 			line += fmt.Sprintf(" %s=%q", label, truncateUTF8(c.Password, blocklistDeMaxFieldLen))
+		}
+		if c.PublicKey != "" {
+			line += fmt.Sprintf(" publickey=%q", truncateUTF8(c.PublicKey, blocklistDeMaxFieldLen))
 		}
 		line += "\n"
 
