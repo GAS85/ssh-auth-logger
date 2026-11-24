@@ -264,6 +264,7 @@ function classify(event) {
   let type = "other";
   if (isReport) type = "report";
   else if (msg.includes("dropped")) type = "dropped";
+  else if (msg.includes("ports scan detected")) type = "portscan";
   else if (msg.includes("connection")) type = "connection";
   else if (msg.includes("password") || msg.includes("login attempt"))
     type = "password";
@@ -305,7 +306,9 @@ async function buildDashboard() {
 
   // Latest events that belong to a source address (startup and abuse messages have none).
   // The page shows 10, 20 or 50 rows as the viewer chooses, so up to MAX_ROWS are sent.
-  const recent = events.filter((e) => e.src && e.type !== "other").slice(0, MAX_ROWS);
+  const recent = events
+    .filter((e) => e.src && e.type !== "other")
+    .slice(0, MAX_ROWS);
   const credentials = events
     .filter((e) => e.type === "password" || e.type === "key")
     .slice(0, MAX_ROWS);
@@ -372,6 +375,7 @@ async function buildDashboard() {
       passwords: 0,
       keys: 0,
       dropped: 0,
+      portscans: 0,
       current: i === WINDOW_MINUTES - 1,
       complete: !(truncated && startMs < oldest),
     };
@@ -389,6 +393,7 @@ async function buildDashboard() {
     if (e.type === "password") b.passwords++;
     if (e.type === "key") b.keys++;
     if (e.type === "dropped") b.dropped++;
+    if (e.type === "portscan") b.portscans++;
   }
 
   const countryCounts = {};
@@ -471,7 +476,9 @@ async function serveStatic(req, res, pathname) {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     // Libraries and map data never change under the same file name; the page itself must always be fresh.
-    "Cache-Control": rel.startsWith("/vendor/") ? "public, max-age=86400" : "no-cache",
+    "Cache-Control": rel.startsWith("/vendor/")
+      ? "public, max-age=86400"
+      : "no-cache",
   };
   if (type === "text/html") headers["Content-Security-Policy"] = PAGE_CSP;
   res.writeHead(200, headers);
@@ -498,7 +505,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if ((req.method === "GET" || req.method === "HEAD") && (await serveStatic(req, res, url.pathname))) {
+  if (
+    (req.method === "GET" || req.method === "HEAD") &&
+    (await serveStatic(req, res, url.pathname))
+  ) {
     return;
   }
 

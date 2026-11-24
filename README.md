@@ -1,6 +1,6 @@
 # SSH Auth Logger
 
-A low/zero interaction ssh authentication logging honeypot. Initially developed by [JustinAzoff](https://github.com/JustinAzoff).
+A low/zero interaction ssh authentication logging honeypot. Initially developed by [JustinAzoff](https://github.com/JustinAzoff) and reworked in [v2](https://github.com/GAS85/ssh-auth-logger/releases#release-v2.0.0).
 
 [![Dev Build](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml/badge.svg?branch=dev)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml)
 [![Test Automation](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml/badge.svg)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml)
@@ -26,13 +26,23 @@ Donations:
 
 ## Interesting features
 
+- Structured logging
+- "Random" host keys
+- Different profiles - each IP get some different profile with welcome banner, ciphers and keys support
+- Force specific profile
+- Optional Web UI with separate container
+- Abuse reporting to different DBs
+- Ports scan detection
+- Statistic endpoint
+- SSH and Telnet Rate limiting, with default slow network simulation
+
 ### Structured logging
 
 ssh-auth-logger logs all authentication attempts as json making it easy to consume in other tools.  No more ugly [openssh log parsing vulnerabilities](http://dcid.me/texts/attacking-log-analysis-tools.html).
 
 ### "Random" host keys
 
-ssh-auth-logger uses HMAC to hash the destination IP address and a key in order to generate a consistently "random" key for every responding IP address.  This means you can run ssh-auth-logger on a /16 and every ip address will appear with a different host key. Random sshd version reporting as well.
+ssh-auth-logger uses HMAC to hash the destination IP address and a key in order to generate a consistently "random" key for every responding IP address. This means you can run ssh-auth-logger on a /16 and every ip address will appear with a different host key. Random sshd version reporting as well.
 
 ### Web UI
 
@@ -141,7 +151,7 @@ ssh user@localhost -p 2222 -o StrictHostKeyChecking=no -o PubkeyAuthentication=n
 
 ### Run with Docker compose
 
-Docker compose example with variables:
+Docker compose example with variables, refer to the [`.env`](.env) file a full list:
 
 ```yaml
 # Create isolated network
@@ -164,9 +174,9 @@ services:
 
       # SSHD Part
 
-      #- SSHD_RATE=500                         # bits per second, emulate very slow connection
+      #- SSHD_RATE=450                         # bytes per second, emulate very slow connection
       #- SSHD_BIND=:2222                       # Port and interface sshd to listen
-      #- SSHD_KEY_KEY="Take me to your leader" # It's a secret key that is used to generate a deterministic hash value for a given host IP address
+      #- SSHD_KEY_KEY=this-is-a-random-secret  # It's a secret key that is used to generate a deterministic hash value for a given host IP address. Random will be used if not set
       #- SSHD_MAX_AUTH_TRIES=6                 # The minimum number of authentication attempts allowed
       #- SSHD_RSA_BITS=3072                    # If you use 'rsa' you can also set RSA key size, 2048, 3072, 4096 (very rare)
       #- SSHD_PROFILE_SCOPE=host               # Can be 'remote_ip' (each remote IP gets its own profile, simulating per-attacker behavior.), or anything else for 'host' (the same local host always gets the same profile, e.g. binding to 0.0.0.0:22 will always select the same Profile).
@@ -180,7 +190,7 @@ services:
 
       #- TELNET_BIND=:2323              # Port and interface telnetd to listen
       #- TELNET_LOG_CLEAR_PASSWORD=true # Log Passwords as clear text or Base64 coded
-      #- TELNET_RATE=100                # bits per second, emulate very slow connection
+      #- TELNET_RATE=100                # bytes per second, emulate very slow connection
     volumes:
       # Mount log file if needed
       - /var/docker/ssh-auth-logger/log:/var/log
@@ -490,6 +500,24 @@ ignoreregex =
 ```
 
 Set `maxretry` for this filter around 1,5 - 2 bigger than for a [Block logging attempts `maxretry`](#block-logging-attempts).
+
+### Block Port scan
+
+The same approach as above, but with different filter:
+
+```shell
+[Definition]
+_daemon = ssh-auth-logger
+
+# Match JSON log line with a "time", "msg" fields and a "src" IP
+failregex = ^.*"msg":"Port scan detected - .*".*"src":"<HOST>".*$
+
+datepattern = %%Y-%%m-%%dT%%H:%%M:%%S(?:Z|%%z)
+
+ignoreregex =
+```
+
+Set `maxretry` for this filter 1 or 2. 1 HTTP/HTTPS or empty Credentials hit will cause ban.
 
 ## Cacti integration ![Cacti icon](https://avatars.githubusercontent.com/u/5142645?s=30&v=4)
 

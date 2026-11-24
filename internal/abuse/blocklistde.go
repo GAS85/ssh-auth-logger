@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 )
 
@@ -80,20 +81,27 @@ func newBlocklistDeFromEnv() (Backend, logrus.Fields) {
 		},
 	}
 
+	// Build static part for startup output
+	blocklistFields := logrus.Fields{
+		"BLOCKLIST_ENABLED": true,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_SSH_SERVICE", b.sshService, "ssh-auth")
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_TELNET_SERVICE", b.telnetService, "bruteforcelogin")
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_REPORT_CLEAR_USERNAME", b.reportClearUsername, true)
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_REPORT_CLEAR_PASSWORD", b.reportClearPassword, false)
+	startup.AddIfNotDefault(blocklistFields, "BLOCKLIST_REPORT_HASHED_PASSWORD", b.reportHashedPassword, true)
+
 	// The server e-mail / API key are deliberately not part of the startup log.
 	return b, logrus.Fields{
-		"blocklist": logrus.Fields{
-			"BLOCKLIST_ENABLED":                true,
-			"BLOCKLIST_SSH_SERVICE":            b.sshService,
-			"BLOCKLIST_TELNET_SERVICE":         b.telnetService,
-			"BLOCKLIST_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
-			"BLOCKLIST_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
-			"BLOCKLIST_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
-		},
+		"blocklist": blocklistFields,
 	}
 }
 
 func (b *blocklistDeBackend) Name() string { return "blocklist.de" }
+
+// ReportsPublicKeys implements PublicKeyReporter: public keys are public, so their fingerprints are always included in the logs, as for AbuseIPDB. A client that only offers keys has no username or password worth sending, the fingerprint is then the actual evidence of the attempt.
+func (b *blocklistDeBackend) ReportsPublicKeys() bool { return true }
 
 // Sanitize keeps usernames / passwords only if explicitly enabled.
 // Hashed passwords are cut to the first 8 symbols (same as the other backends).
@@ -122,7 +130,7 @@ func (b *blocklistDeBackend) serviceFor(protocol string) string {
 	return b.sshService
 }
 
-// buildLogs renders the collected attempts as log lines. Attacker-controlled values are quoted with %q, so a username containing a newline cannot forge additional log lines. Output is capped at blocklistDeMaxLogsLen bytes, whole lines only.
+// buildLogs renders the collected attempts as log lines (the API rejects an empty or very short "logs" field, so there is always at least one full line). Attacker-controlled values are quoted with %q, so a username containing a newline cannot forge additional log lines. Output is capped at blocklistDeMaxLogsLen bytes, whole lines only.
 func (b *blocklistDeBackend) buildLogs(rep Report) string {
 	creds := rep.Creds
 	if len(creds) == 0 {
@@ -143,6 +151,9 @@ func (b *blocklistDeBackend) buildLogs(rep Report) string {
 				label = "password_sha1_prefix"
 			}
 			line += fmt.Sprintf(" %s=%q", label, truncateUTF8(c.Password, blocklistDeMaxFieldLen))
+		}
+		if c.PublicKey != "" {
+			line += fmt.Sprintf(" publickey=%q", truncateUTF8(c.PublicKey, blocklistDeMaxFieldLen))
 		}
 		line += "\n"
 

@@ -225,8 +225,12 @@ func TestInit_InvalidConfigurationIsFatal(t *testing.T) {
 		wantInErr string
 	}{
 		{"unknown mode", []string{"LOG_TO=syslog"}, "invalid LOG_TO"},
-		{"file without path", []string{"LOG_TO=file"}, "LOG_FILE_PATH"},
-		{"both without path", []string{"LOG_TO=both"}, "LOG_FILE_PATH"},
+		{"rsa bits too small", []string{"SSHD_RSA_BITS=1024"}, "SSHD_RSA_BITS"},
+		{"rsa bits odd", []string{"SSHD_RSA_BITS=3073"}, "SSHD_RSA_BITS"},
+		{"rsa bits not a number", []string{"SSHD_RSA_BITS=big"}, "SSHD_RSA_BITS"},
+		// LOG_FILE_PATH has a default (blank counts as unset), so a missing path is not an error any more.
+		{"file path is a directory", []string{"LOG_TO=file", "LOG_FILE_PATH=" + dir}, "LOG_FILE_PATH"},
+		{"both with a directory as path", []string{"LOG_TO=both", "LOG_FILE_PATH=" + dir}, "LOG_FILE_PATH"},
 		{"unopenable path", []string{"LOG_TO=file", "LOG_FILE_PATH=" + filepath.Join(dir, "missing", "app.log")}, "LOG_FILE_PATH"},
 	}
 	for _, tc := range cases {
@@ -242,5 +246,133 @@ func TestInit_InvalidConfigurationIsFatal(t *testing.T) {
 				t.Error("must not start up with an invalid log configuration")
 			}
 		})
+	}
+}
+
+// ── startup output: defaults are hidden, deviations are shown ─────────────────
+
+// defaultEnv blanks every variable that takes part in the startup output. A blank value counts as unset, so this
+// shields the child from the environment of the machine running the tests.
+var defaultEnv = []string{
+	"SSHD_SEND_BANNER=", "SSHD_MAX_AUTH_TRIES=", "SSHD_RSA_BITS=", "SSHD_PROFILE_SCOPE=",
+	"SSHD_LOG_CLEAR_PASSWORD=", "SSHD_HOST_KEY_CACHE_TTL=", "SSHD_HOST_KEY_CACHE_CLEANUP=",
+	"USE_EXACT_RATE=", "TELNET_LOG_CLEAR_PASSWORD=", "LOG_PRIVATE_IPS_AS_USUAL=", "LOG_FILTER=",
+	"STATS_BIND=", "STATS_TOKEN=",
+}
+
+func section(entry map[string]any, name string) map[string]any {
+	m, _ := entry[name].(map[string]any)
+	return m
+}
+
+func TestInit_StartupHidesDefaults(t *testing.T) {
+	out, err := runInitHelper(t, defaultEnv...)
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
+	}
+	entry := startupEntry(t, out.stdout)
+
+	hidden := map[string][]string{
+		"ssh": {"SSHD_SEND_BANNER", "SSHD_MAX_AUTH_TRIES", "SSHD_RSA_BITS", "SSHD_PROFILE_SCOPE",
+			"SSHD_LOG_CLEAR_PASSWORD", "SSHD_HOST_KEY_CACHE_TTL", "SSHD_HOST_KEY_CACHE_CLEANUP", "USE_EXACT_RATE"},
+		"telnet":  {"TELNET_LOG_CLEAR_PASSWORD"},
+		"logging": {"LOG_FILE_PATH", "LOG_FILTER", "LOG_PRIVATE_IPS_AS_USUAL"},
+		"stats":   {"STATS_BIND"},
+	}
+	for name, keys := range hidden {
+		sec := section(entry, name)
+		if sec == nil {
+			t.Fatalf("startup section %q missing: %v", name, entry)
+		}
+		for _, k := range keys {
+			if _, ok := sec[k]; ok {
+				t.Errorf("%s.%s has its default value and must not be shown", name, k)
+			}
+		}
+	}
+
+	// Always shown, whatever their value.
+	for name, keys := range map[string][]string{
+		"ssh":     {"SSHD_BIND", "SSHD_KEY_KEY", "SSHD_RATE"},
+		"telnet":  {"TELNET_BIND", "TELNET_RATE"},
+		"logging": {"LOG_TO"},
+		"stats":   {"STATS_TOKEN"},
+	} {
+		for _, k := range keys {
+			if _, ok := section(entry, name)[k]; !ok {
+				t.Errorf("%s.%s must always be shown", name, k)
+			}
+		}
+	}
+	if section(entry, "stats")["STATS_TOKEN"] != false {
+		t.Errorf("STATS_TOKEN must be a bool, false when unset: %v", section(entry, "stats"))
+	}
+}
+
+func TestInit_StartupShowsNonDefaults(t *testing.T) {
+	env := append(append([]string{}, defaultEnv...),
+		"SSHD_MAX_AUTH_TRIES=3", "SSHD_RSA_BITS=4096", "SSHD_SEND_BANNER=true", "SSHD_PROFILE_SCOPE=remote_ip",
+		"TELNET_LOG_CLEAR_PASSWORD=false", "LOG_PRIVATE_IPS_AS_USUAL=true",
+		"STATS_BIND=127.0.0.1:0", "STATS_TOKEN=very-secret-token")
+	out, err := runInitHelper(t, env...)
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
+	}
+	entry := startupEntry(t, out.stdout)
+	ssh, telnet, stats, logging := section(entry, "ssh"), section(entry, "telnet"), section(entry, "stats"), section(entry, "logging")
+
+	if ssh["SSHD_MAX_AUTH_TRIES"] != float64(3) || ssh["SSHD_RSA_BITS"] != float64(4096) ||
+		ssh["SSHD_SEND_BANNER"] != true || ssh["SSHD_PROFILE_SCOPE"] != "remote_ip" {
+		t.Errorf("ssh section = %v", ssh)
+	}
+	if telnet["TELNET_LOG_CLEAR_PASSWORD"] != false {
+		t.Errorf("telnet section = %v", telnet)
+	}
+	if logging["LOG_PRIVATE_IPS_AS_USUAL"] != true {
+		t.Errorf("logging section = %v", logging)
+	}
+	// STATS_BIND must report the bind address itself (it used to be compared against LOG_FILTER by mistake).
+	if stats["STATS_BIND"] != "127.0.0.1:0" || stats["STATS_TOKEN"] != true {
+		t.Errorf("stats section = %v", stats)
+	}
+	if strings.Contains(out.stdout+out.stderr, "very-secret-token") {
+		t.Error("the stats token must never be logged")
+	}
+}
+
+// LOG_FILE_PATH is shown whenever a file is used (its default is not empty), and never for console output.
+func TestInit_StartupShowsLogFilePathOnlyWhenAFileIsUsed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	out, err := runInitHelper(t, append(append([]string{}, defaultEnv...), "LOG_TO=file", "LOG_FILE_PATH="+path)...)
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
+	}
+	// With LOG_TO=file the startup line goes to the console and the file.
+	entry := startupEntry(t, out.stdout)
+	if got := section(entry, "logging")["LOG_FILE_PATH"]; got != path {
+		t.Errorf("LOG_FILE_PATH = %v, want %s", got, path)
+	}
+}
+
+// At debug level the startup line lists every setting, defaults included.
+func TestInit_DebugLevelShowsDefaults(t *testing.T) {
+	out, err := runInitHelper(t, append(append([]string{}, defaultEnv...), "LOG_LEVEL=debug")...)
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, out.stderr)
+	}
+	entry := startupEntry(t, out.stdout)
+	for name, keys := range map[string][]string{
+		"ssh": {"SSHD_SEND_BANNER", "SSHD_MAX_AUTH_TRIES", "SSHD_RSA_BITS", "SSHD_PROFILE_SCOPE",
+			"SSHD_LOG_CLEAR_PASSWORD", "SSHD_HOST_KEY_CACHE_TTL", "SSHD_HOST_KEY_CACHE_CLEANUP", "USE_EXACT_RATE"},
+		"telnet":  {"TELNET_LOG_CLEAR_PASSWORD"},
+		"logging": {"LOG_FILTER", "LOG_PRIVATE_IPS_AS_USUAL"},
+		"stats":   {"STATS_BIND"},
+	} {
+		sec := section(entry, name)
+		for _, k := range keys {
+			if _, ok := sec[k]; !ok {
+				t.Errorf("%s.%s must be shown at debug level", name, k)
+			}
+		}
 	}
 }

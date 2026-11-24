@@ -216,18 +216,21 @@ func TestHostKeyCacheCleanup_LogsRemovedAndRemaining(t *testing.T) {
 func TestHostKeyCacheCleanup_SilentAtInfoLevel(t *testing.T) {
 	c := newCleanupTestCache(time.Hour, map[string]time.Duration{"drop": 2 * time.Hour})
 
-	var buf bytes.Buffer
+	// Count log entries with a hook instead of looking at an output buffer: other tests replace the hooks and the
+	// output of the standard logger, so an empty buffer would prove nothing. Hooks do not fire for disabled levels.
 	std := logrus.StandardLogger()
-	oldLevel, oldOut := std.GetLevel(), std.Out
+	oldLevel := std.GetLevel()
 	std.SetLevel(logrus.InfoLevel)
-	std.SetOutput(&buf)
-	defer func() { std.SetLevel(oldLevel); std.SetOutput(oldOut) }()
+	hook := &logHook{}
+	std.ReplaceHooks(logrus.LevelHooks{})
+	std.AddHook(hook)
+	t.Cleanup(func() { std.ReplaceHooks(logrus.LevelHooks{}); std.SetLevel(oldLevel) })
 
 	c.cleanup()
 
 	assertCacheKeys(t, c)
-	if buf.Len() != 0 {
-		t.Errorf("unexpected output at info level: %q", buf.String())
+	if n := len(hook.Entries); n != 0 {
+		t.Errorf("unexpected %d log entries at info level: %v", n, hook.Entries[0].Message)
 	}
 }
 

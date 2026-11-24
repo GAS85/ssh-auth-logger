@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 )
 
@@ -89,7 +90,8 @@ func newDShieldFromEnv() (Backend, logrus.Fields) {
 		logrus.Fatal("Invalid DSHIELD_BATCH_SIZE environment variable")
 	}
 
-	flushEvery, err := time.ParseDuration(getenv("DSHIELD_BATCH_INTERVAL", "10m"))
+	flushEveryStr := getenv("DSHIELD_BATCH_INTERVAL", "10m")
+	flushEvery, err := time.ParseDuration(flushEveryStr)
 	if err != nil || flushEvery <= 0 {
 		logrus.Fatal("Invalid DSHIELD_BATCH_INTERVAL environment variable")
 	}
@@ -129,21 +131,28 @@ func newDShieldFromEnv() (Backend, logrus.Fields) {
 	b.loopDone = make(chan struct{})
 	go b.flushLoop()
 
+	// Build static part for startup output
+	dshieldFields := logrus.Fields{
+		"DSHIELD_ENABLED": true,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_USERID", b.userID, "")
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_BATCH_SIZE", b.batchSize, 50)
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_BATCH_INTERVAL", flushEveryStr, "10m")
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_REPORT_CLEAR_USERNAME", b.reportClearUsername, true)
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_REPORT_CLEAR_PASSWORD", b.reportClearPassword, true)
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_REPORT_HASHED_PASSWORD", b.reportHashedPassword, false)
+	startup.AddIfNotDefault(dshieldFields, "DSHIELD_DEBUG", b.debug, false)
+
 	return b, logrus.Fields{
-		"dshield": logrus.Fields{
-			"DSHIELD_ENABLED":                true,
-			"DSHIELD_USERID":                 b.userID,
-			"DSHIELD_BATCH_SIZE":             b.batchSize,
-			"DSHIELD_BATCH_INTERVAL":         b.flushEvery.String(),
-			"DSHIELD_DEBUG":                  b.debug,
-			"DSHIELD_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
-			"DSHIELD_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
-			"DSHIELD_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
-		},
+		"dshield": dshieldFields,
 	}
 }
 
 func (b *dshieldBackend) Name() string { return "DShield" }
+
+// IgnoresIPCooldown implements CooldownExempt: DShield takes log lines in batches and has no per-IP rate limit, so the ABUSE_REPORT_INTERVAL cooldown must not delay its credentials.
+func (b *dshieldBackend) IgnoresIPCooldown() bool { return true }
 
 // Sanitize keeps usernames / passwords only if explicitly enabled.
 func (b *dshieldBackend) Sanitize(username, password string) (string, string) {

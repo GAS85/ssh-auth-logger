@@ -7,7 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
+	"math/big"
 	"math/rand"
 	"net"
 	"os"
@@ -15,9 +19,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GAS85/ssh-auth-logger/internal/abuse"
 	"github.com/GAS85/ssh-auth-logger/internal/common"
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -33,6 +39,13 @@ const (
 
 	// shutdownFlushTimeout bounds how long SIGTERM/SIGINT waits for batching abuse backends to send their queue. It stays below the 10s that Docker and systemd give a container or service before killing it.
 	shutdownFlushTimeout = 8 * time.Second
+
+	// acceptRetryDelay is the pause after a failed Accept, so a persistent error (EMFILE) does not spin the CPU.
+	acceptRetryDelay = 100 * time.Millisecond
+
+	// Limits for reading a telnet line from an untrusted client.
+	// A client can stream bytes with no newline and grow result without limit, and idle connections hold a goroutine forever.
+	maxTelnetLineLen = 1024
 )
 
 var (
@@ -46,6 +59,7 @@ var (
 	maxAuthTries     int
 	rsaBits          int    // only used if hostKeyType == "rsa"
 	profileScope     string // "host" or "remote_ip"
+	useExactRate     bool
 	sendBanner       bool
 	logClearPassword bool
 
@@ -58,6 +72,10 @@ var (
 
 	hostKeyCacheTTL     time.Duration
 	hostKeyCacheCleanup time.Duration
+
+	// readLine now stops after telnetReadDeadline seconds in total.
+	// Variable so tests can shorten it
+	telnetReadDeadline = 30 * time.Second
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -173,7 +191,8 @@ func resolveProfileKey(scope string, conn net.Conn) string {
 
 // withReputation adds the cached IP reputation (countryCode, abuseConfidenceScore, totalReports) of the source IP to fields. It never blocks: on first sight of an IP, or if the data is not available, nothing is added.
 func withReputation(fields logrus.Fields) logrus.Fields {
-	if src, ok := fields["src"].(string); ok {
+	// Private addresses are never looked up: it would only cost API quota.
+	if src, ok := fields["src"].(string); ok && reportableIP(src) {
 		for k, v := range abuseReporter.ReputationFields(src) {
 			fields[k] = v
 		}
@@ -203,6 +222,9 @@ func reportableIP(ip string) bool {
 }
 
 // Telnet handler
+// telnetCloseDelay is how long a telnet connection is kept open after the login attempt, so that a client sees the same slow "wrong password" behavior as with a real login. Variable so tests do not have to wait for it.
+var telnetCloseDelay = 2 * time.Second
+
 func handleTelnetConnection(conn net.Conn) {
 	defer conn.Close()
 
@@ -247,38 +269,120 @@ func handleTelnetConnection(conn net.Conn) {
 	// This will show the password in cleartext if telnetLogClearPassword is true, otherwise it will log the base64 encoded if telnetLogClearPassword is false
 	var loggedPassword any
 	if telnetLogClearPassword {
-		loggedPassword = string(password)
+		loggedPassword = loggableText(password)
 	} else {
 		loggedPassword = base64.StdEncoding.EncodeToString([]byte(password))
 	}
 
 	fields := connLogParameters(conn)
-	fields["duser"] = username
+	fields["duser"] = loggableText(username)
 	fields["password"] = loggedPassword
 	fields["protocol"] = "telnet"
 
-	stats.TelnetPasswords.Add(1)
+	// Port-scan probes (HTTP/HTTPS requests, empty credentials) are not password attempts: they are
+	// neither counted in the statistics nor reported to the abuse backends. Remove trash from the logs.
+	message, isScan := classifyTelnetAttempt(username, loggedPassword.(string))
+	if isScan {
+		delete(fields, "duser")
+		delete(fields, "password")
+	} else {
+		stats.TelnetPasswords.Add(1)
+	}
 	logger.WithFields(fields).
 		WithField("destinationServicename", "telnetd").
-		Log(attemptLogLevel(src), "Telnet login attempt")
+		Log(attemptLogLevel(src), message)
 
-	// AbuseIPDB reporting
-	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
-	if err == nil && reportableIP(ip) {
-		abuseReporter.RecordFailure(
-			ip,
-			"Telnet",
-			string(username),
-			string(password),
-		)
+	// Abuse reporting (real login attempts only)
+	if !isScan {
+		ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+		if err == nil && reportableIP(ip) {
+			abuseReporter.RecordFailure(ip, "Telnet", loggableText(username), loggableText(password))
+		}
 	}
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(telnetCloseDelay)
 	limitedConn.Write([]byte("\r\nLogin incorrect\r\n"))
 }
 
-// Simple Telnet Parser
+// classifyTelnetAttempt returns the log message for a telnet login attempt and whether it is a
+// port-scan probe rather than a real credential attempt.
+func classifyTelnetAttempt(username, loggedPassword string) (message string, scan bool) {
+	switch {
+	case isHttpProtocolProbe(username):
+		return "Ports scan detected - HTTP: " + username + "; " + loggedPassword, true
+	case isHttpsProtocolProbe(username):
+		return "Ports scan detected - HTTPS", true
+	case isBinaryProbe(username):
+		return fmt.Sprintf("Ports scan detected - binary data (%d bytes): %s", len(username), hexPreview(username)), true
+	case username == "" && loggedPassword == "":
+		return "Ports scan detected - empty credentials", true
+	}
+	return "Telnet login attempt", false
+}
+
+var httpMethods = []string{
+	"GET /",
+	"POST /",
+	"PUT /",
+	"DELETE /",
+	"PATCH /",
+	"HEAD /",
+	"OPTIONS /",
+}
+
+// isHttpProtocolProbe reports whether username is really the first bytes of another protocol sent to the SSH/Telnet port: an HTTP request line ("GET / HTTP/1.1", the "password" is then the Host header)
+func isHttpProtocolProbe(username string) bool {
+	for _, method := range httpMethods {
+		if strings.HasPrefix(username, method) {
+			return true
+		}
+	}
+	return false
+}
+
+// ...or the start of a TLS handshake (record header 0x16 0x03).
+func isHttpsProtocolProbe(username string) bool {
+	return strings.HasPrefix(username, "\x16\x03")
+}
+
+// isBinaryProbe reports whether username contains control characters (tab excepted). A person typing a login name never produces those, so it is the start of some other (binary) protocol sent to the telnet port, e.g. telnet option negotiation or a NUL-padded handshake. Bytes >= 0x80 are deliberately not a criterion: a legacy encoding such as GBK is not valid UTF-8 but is a real login attempt, see loggableText.
+// Can be tested locally with:
+//
+//	(printf '\003\000\000\023\r\n\r\n'; sleep 3) | nc localhost 2323
+func isBinaryProbe(username string) bool {
+	for i := 0; i < len(username); i++ {
+		if c := username[i]; c < 0x20 && c != '\t' || c == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// loggableText returns s unchanged if it is valid UTF-8. Otherwise the bytes are shown as \xNN escapes (for example a GBK encoded name): the JSON log encoder would replace invalid bytes with U+FFFD and lose the data.
+// Can be tested locally with:
+//
+//	(printf '\314\321\321\312\r\n\313\315\333\314\r\n'; sleep 3) | nc localhost 2323
+func loggableText(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	q := strconv.QuoteToASCII(s)
+	return q[1 : len(q)-1]
+}
+
+// hexPreview renders at most the first 32 bytes of s as hex, so binary data is readable and safe to log.
+func hexPreview(s string) string {
+	const max = 32
+	if len(s) > max {
+		return hex.EncodeToString([]byte(s[:max])) + "..."
+	}
+	return hex.EncodeToString([]byte(s))
+}
+
+// readLine reads one line from conn. It gives up after telnetReadDeadline in total and keeps at most
+// maxTelnetLineLen bytes; the rest of an overlong line is read and discarded, so memory stays bounded.
 func readLine(conn net.Conn) (string, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(telnetReadDeadline))
 	buf := make([]byte, 1)
 	var result []byte
 
@@ -299,16 +403,18 @@ func readLine(conn net.Conn) (string, error) {
 		}
 
 		// Ignore CR
-		if buf[0] == '\r' {
+		if b == '\r' {
 			continue
 		}
 
 		// End on LF
-		if buf[0] == '\n' {
+		if b == '\n' {
 			break
 		}
 
-		result = append(result, buf[0])
+		if len(result) < maxTelnetLineLen {
+			result = append(result, b)
+		}
 	}
 
 	return strings.TrimSpace(string(result)), nil
@@ -346,36 +452,32 @@ func (r *rateLimitedConn) Write(p []byte) (n int, err error) {
 func (r *rateLimitedConn) limitWrite(p []byte) (int, error) {
 	var totalWritten int
 	for len(p) > 0 {
-		// Calculate available tokens.
+		// Add the tokens earned since the last update. Only the time those whole tokens account for is
+		// consumed, the fraction stays: with a coarse poll the fractional part must not be thrown away, or an
+		// empty bucket would never refill and this loop would spin forever.
 		now := time.Now()
-		elapsed := now.Sub(r.lastUpdate).Seconds()
-		r.tokens += int(elapsed * float64(r.rate))
-		if r.tokens > r.bufferSize {
-			r.tokens = r.bufferSize
-		}
-		r.lastUpdate = now
-
-		// Determine how many bytes we can write.
-		availableTokens := r.tokens
-		if availableTokens > len(p) {
-			availableTokens = len(p)
+		if add := int(now.Sub(r.lastUpdate).Seconds() * float64(r.rate)); add > 0 {
+			r.tokens += add
+			if r.tokens >= r.bufferSize {
+				r.tokens, r.lastUpdate = r.bufferSize, now
+			} else {
+				r.lastUpdate = r.lastUpdate.Add(time.Duration(float64(add) / float64(r.rate) * float64(time.Second)))
+			}
 		}
 
-		// Write data.
-		n, err := r.Conn.Write(p[:availableTokens])
+		// Nothing to spend yet: wait for one token instead of busy-looping.
+		if r.tokens <= 0 {
+			time.Sleep(time.Second / time.Duration(r.rate))
+			continue
+		}
+
+		n, err := r.Conn.Write(p[:min(r.tokens, len(p))])
 		totalWritten += n
 		r.tokens -= n
 		if err != nil {
 			return totalWritten, err
 		}
-
-		// Adjust the buffer.
 		p = p[n:]
-
-		// If there are still bytes to write, sleep to accumulate tokens.
-		if len(p) > 0 {
-			time.Sleep(time.Duration(availableTokens) * time.Second / time.Duration(r.rate))
-		}
 	}
 	return totalWritten, nil
 }
@@ -469,8 +571,9 @@ func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
 		}
 
 	case "rsa":
-		// Using rng heir is cheaper as crypto/rand, as honeypot it is ok
-		key, err := rsa.GenerateKey(rng, rsaBits)
+		// rsa.GenerateKey mixes in extra randomness even for a seeded reader, so its keys are not reproducible.
+		// A host key that changes after a restart makes the honeypot easy to fingerprint, so derive it ourselves.
+		key, err := generateDeterministicRSAKey(rng, rsaBits)
 		if err != nil {
 			return nil, err
 		}
@@ -502,6 +605,69 @@ func getHostKeySigner(host, keyType string) (ssh.Signer, error) {
 	hostKeys.mu.Unlock()
 
 	return signer, nil
+}
+
+// generateDeterministicRSAKey builds an RSA key whose primes are taken from r, so the same stream always gives the same key. Only for a honeypot host key: the randomness is a seeded PRNG, never use it for keys that protect anything.
+func generateDeterministicRSAKey(r io.Reader, bits int) (*rsa.PrivateKey, error) {
+	if bits < 1024 || bits%2 != 0 {
+		return nil, fmt.Errorf("unsupported RSA key size %d", bits)
+	}
+	e := big.NewInt(65537)
+
+	prime := func() (*big.Int, error) {
+		buf := make([]byte, bits/16)
+		for {
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return nil, err
+			}
+			// Top two bits set: the product of two such primes has exactly `bits` bits. Low bit set: odd.
+			buf[0] |= 0xC0
+			buf[len(buf)-1] |= 1
+			p := new(big.Int).SetBytes(buf)
+			if !p.ProbablyPrime(20) {
+				continue
+			}
+			// e must be invertible modulo p-1.
+			pm1 := new(big.Int).Sub(p, big.NewInt(1))
+			if new(big.Int).GCD(nil, nil, e, pm1).Cmp(big.NewInt(1)) != 0 {
+				continue
+			}
+			return p, nil
+		}
+	}
+
+	for {
+		p, err := prime()
+		if err != nil {
+			return nil, err
+		}
+		q, err := prime()
+		if err != nil {
+			return nil, err
+		}
+		if p.Cmp(q) == 0 {
+			continue
+		}
+		n := new(big.Int).Mul(p, q)
+		if n.BitLen() != bits {
+			continue
+		}
+		phi := new(big.Int).Mul(new(big.Int).Sub(p, big.NewInt(1)), new(big.Int).Sub(q, big.NewInt(1)))
+		d := new(big.Int).ModInverse(e, phi)
+		if d == nil {
+			continue
+		}
+		key := &rsa.PrivateKey{
+			PublicKey: rsa.PublicKey{N: n, E: int(e.Int64())},
+			D:         d,
+			Primes:    []*big.Int{p, q},
+		}
+		if err := key.Validate(); err != nil {
+			return nil, err
+		}
+		key.Precompute()
+		return key, nil
+	}
 }
 
 var serverProfiles = []serverProfile{
@@ -744,17 +910,18 @@ func getServerProfile(host string) serverProfile {
 		}
 	}
 	// Create a deterministic seed from "profile:" plus host, computes an HMAC-SHA256 and interprets its first eight bytes as an int64.
-	// One edge case: negating the minimum int64 value overflows and leaves it negative, which can produce an invalid index.
 	// Index selects the profile at that position in the slice’s declared order.
 	// Selection is deterministic for the same host, key, and list order.
 	seed := HashToInt64([]byte("profile:"+host), []byte(sshd_key_key))
-	if seed < 0 {
-		seed = -seed
-	}
-	return serverProfiles[int(seed)%len(serverProfiles)]
+	return serverProfiles[profileIndex(seed, len(serverProfiles))]
 }
 
-func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
+// profileIndex maps a seed to an index in [0, n). It works on the unsigned value, so negative seeds, including math.MinInt64 (which cannot be negated), always give a valid index.
+func profileIndex(seed int64, n int) int {
+	return int(uint64(seed) % uint64(n))
+}
+
+func makeSSHConfig(conn net.Conn) (ssh.ServerConfig, error) {
 	state := &authState{}
 	// per‑local host profile
 	//	profile := getServerProfile(host)
@@ -860,7 +1027,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	// Generate primary host key signer
 	primarySigner, err := getHostKeySigner(profileKey, profile.HostKeyType)
 	if err != nil {
-		logrus.Panic(err)
+		return ssh.ServerConfig{}, fmt.Errorf("host key for profile %q: %w", profileKey, err)
 	}
 
 	primaryType := primarySigner.PublicKey().Type()
@@ -889,7 +1056,7 @@ func makeSSHConfig(conn net.Conn) ssh.ServerConfig {
 	// capture primary type for logging
 	actualHostKeyType = primaryType
 
-	return config
+	return config, nil
 }
 
 // serveSSHConn counts and logs a freshly accepted SSH connection and handles it in the background.
@@ -904,12 +1071,22 @@ func serveSSHConn(conn net.Conn) {
 	logger.WithFields(withReputation(connFields)).Log(connLogLevel(src), "SSH connection")
 
 	limitedConn := newRateLimitedConn(conn, rate)
-	config := makeSSHConfig(conn)
+	// Host key generation can take seconds (RSA), so it happens in the connection's goroutine and never blocks the accept loop.
 	go func() {
 		defer open.Add(-1)
+		config, err := makeSSHConfig(conn)
+		if err != nil {
+			logger.WithFields(connFields).WithError(err).Error("Cannot set up SSH host keys, closing connection")
+			conn.Close()
+			return
+		}
 		handleConnection(limitedConn, &config)
 	}()
 }
+
+// sshConnTimeout bounds the whole SSH handshake and authentication phase. Without it a client that connects and then
+// stays silent would hold a goroutine, a socket and a host key forever. Variable so tests can shorten it.
+var sshConnTimeout = 2 * time.Minute
 
 func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	// Random early disconnect (~10%)
@@ -926,91 +1103,116 @@ func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	// Simulate OpenSSH banner timing
 	time.Sleep(time.Duration(20+rand.Intn(120)) * time.Millisecond)
 
+	_ = conn.SetDeadline(time.Now().Add(sshConnTimeout))
+
 	_, _, _, err := ssh.NewServerConn(conn, config)
 	if err == nil {
-		// This should never happen because auth never succeeds
-		logrus.Panic("Successful login? why!?")
+		// This should never happen because auth never succeeds. Do not panic: this runs in a connection goroutine and would take the whole honeypot down.
+		logger.WithFields(connLogParameters(conn)).Error("Successful login? why!?")
+		conn.Close()
 	}
-	if err != nil {
-		// Auth failed or client closed connection — expected behavior
-		return
-	}
-}
-
-// getEnvWithDefault returns the environment value for key
-// returning fallback instead if it is missing or blank
-func getEnvWithDefault(key, fallback string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return fallback
-	}
-	return value
+	// err != nil: auth failed, the client left or the deadline passed. Expected behavior.
 }
 
 func init() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
+	// Read LOG_LEVEL variable to give user control on a log level
+	level, err := logrus.ParseLevel(strings.ToLower(os.Getenv("LOG_LEVEL")))
+	if err != nil {
+		level = logrus.InfoLevel
+	}
+	logrus.SetLevel(level)
+
 	// Log destination: LOG_TO=console (default), file or both. Until the startup message is out, everything is also written to the console (see logOutputs), so the configuration is always visible there; afterwards only LOG_TO decides.
-	logFilePath := getEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
+	logFilePath := startup.GetEnvWithDefault("LOG_FILE_PATH", "/var/log/ssh-auth-logger.log")
 	// On the console, info and debug lines go to stdout, warnings and above to stderr; a log file gets both.
-	logOut, err := common.SetupLogOutput(getEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stdout, os.Stderr)
+	logOut, err := common.SetupLogOutput(startup.GetEnvWithDefault("LOG_TO", common.LogToConsole), logFilePath, os.Stdout, os.Stderr)
 	if err != nil {
 		logrus.Fatal(err)
 	}
 	logDest = logOut
 	logOut.UseStartup(logrus.StandardLogger())
 
-	telnetBind = getEnvWithDefault("TELNET_BIND", ":23")
+	telnetBind = startup.GetEnvWithDefault("TELNET_BIND", ":23")
 
-	sshd_bind = getEnvWithDefault("SSHD_BIND", ":22")
-	sshd_key_key = getEnvWithDefault("SSHD_KEY_KEY", "Take me to your leader")
-	rateStr := getEnvWithDefault("SSHD_RATE", strconv.Itoa(rand.Intn(251)+450)) // default rate is rand between 450-700 bits per second very slow...
+	sshd_bind = startup.GetEnvWithDefault("SSHD_BIND", ":22")
+
+	// Host keys are predictable for anyone running defaults. That makes the honeypot fingerprintable.
+	// Generate random seed if nothing provided
+	sshd_key_key = startup.GetEnvWithDefault("SSHD_KEY_KEY", fmt.Sprintf("%016x%016x", rand.Uint64(), rand.Uint64()))
+
+	rateStr := startup.GetEnvWithDefault("SSHD_RATE", "450") // default rate is 450 bytes per second very slow...
 	rate, err = strconv.Atoi(rateStr)
-	if err != nil {
+	if err != nil || rate <= 0 {
 		logrus.Fatal("Invalid SSHD_RATE environment variable")
 	}
-	telnetRateStr := getEnvWithDefault("TELNET_RATE", strconv.Itoa(rand.Intn(221)+80)) // Could be slower than SSH. Default is 80-300 bits per second.
+
+	telnetRateStr := startup.GetEnvWithDefault("TELNET_RATE", "100") // Could be slower than SSH. Default is 100 bytes per second.
 	telnetRate, err = strconv.Atoi(telnetRateStr)
 	if err != nil || telnetRate <= 0 {
 		logrus.Fatal("Invalid TELNET_RATE environment variable")
 	}
-	maxAuthTriesStr := getEnvWithDefault("SSHD_MAX_AUTH_TRIES", "6") // default amount of tries is 6-10.
+
+	// Disable random rate adjustment on start to reduce detection. Per default it is off. We will add some extra to any rate was set.
+	useExactRateStr := startup.GetEnvWithDefault("USE_EXACT_RATE", "false")
+	useExactRate = useExactRateStr == "1" || strings.EqualFold(useExactRateStr, "true") || strings.EqualFold(useExactRateStr, "yes")
+
+	// Random rate adjustment on start to reduce detection.
+	if !useExactRate {
+		rate += rand.Intn(301) - 50       // Between -50 and +250 bytes per second.
+		telnetRate += rand.Intn(121) - 20 // Between -20 and +100 bytes per second.
+		// Ensure rates never become zero or negative after adjustment.
+		if rate < 1 {
+			rate = 1
+		}
+		if telnetRate < 1 {
+			telnetRate = 1
+		}
+	}
+
+	maxAuthTriesStr := startup.GetEnvWithDefault("SSHD_MAX_AUTH_TRIES", "6") // default amount of tries is 6.
 	maxAuthTries, err = strconv.Atoi(maxAuthTriesStr)
 	if err != nil {
 		logrus.Fatal("Invalid SSHD_MAX_AUTH_TRIES environment variable")
 	}
-	rsaBitsStr := getEnvWithDefault("SSHD_RSA_BITS", "3072")
+
+	rsaBitsStr := startup.GetEnvWithDefault("SSHD_RSA_BITS", "3072")
 	rsaBits, err = strconv.Atoi(rsaBitsStr)
-	if err != nil || rsaBits < 2048 {
-		logrus.Fatal("Invalid SSHD_RSA_BITS (must be >= 2048)")
+	if err != nil || rsaBits < 2048 || rsaBits%2 != 0 {
+		logrus.Fatal("Invalid SSHD_RSA_BITS (must be an even number >= 2048)")
 	}
-	profileScope = getEnvWithDefault("SSHD_PROFILE_SCOPE", "host")
-	// Seed for non-deterministic uses to avoid identical timing patterns across restarts
-	// Fine for delays and banner selection — no security issue.
-	rand.Seed(time.Now().UnixNano())
+
+	// Please refer to resolveProfileKey description
+	profileScope = startup.GetEnvWithDefault("SSHD_PROFILE_SCOPE", "host")
+
 	// Banner sending option
-	sendBannerStr := getEnvWithDefault("SSHD_SEND_BANNER", "false")
-	sendBanner = sendBannerStr == "1" || sendBannerStr == "true" || sendBannerStr == "yes"
-	logClearPasswordStr := getEnvWithDefault("SSHD_LOG_CLEAR_PASSWORD", "true")
-	logClearPassword = logClearPasswordStr == "1" || logClearPasswordStr == "true" || logClearPasswordStr == "yes"
-	telnetLogClearPasswordStr := getEnvWithDefault("TELNET_LOG_CLEAR_PASSWORD", "true")
-	telnetLogClearPassword = telnetLogClearPasswordStr == "1" || telnetLogClearPasswordStr == "true" || telnetLogClearPasswordStr == "yes"
+	sendBannerStr := startup.GetEnvWithDefault("SSHD_SEND_BANNER", "false")
+	sendBanner = sendBannerStr == "1" || strings.EqualFold(sendBannerStr, "true") || strings.EqualFold(sendBannerStr, "yes")
+
+	logClearPasswordStr := startup.GetEnvWithDefault("SSHD_LOG_CLEAR_PASSWORD", "true")
+	logClearPassword = logClearPasswordStr == "1" || strings.EqualFold(logClearPasswordStr, "true") || strings.EqualFold(logClearPasswordStr, "yes")
+
+	telnetLogClearPasswordStr := startup.GetEnvWithDefault("TELNET_LOG_CLEAR_PASSWORD", "true")
+	telnetLogClearPassword = telnetLogClearPasswordStr == "1" || strings.EqualFold(telnetLogClearPasswordStr, "true") || strings.EqualFold(telnetLogClearPasswordStr, "yes")
+
 	// Connections from private IPs are logged as warnings and their login attempts as errors, unless this is set.
-	logPrivateIPsAsUsualStr := getEnvWithDefault("LOG_PRIVATE_IPS_AS_USUAL", "false")
-	logPrivateIPsAsUsual = logPrivateIPsAsUsualStr == "1" || logPrivateIPsAsUsualStr == "true" || logPrivateIPsAsUsualStr == "yes"
+	logPrivateIPsAsUsualStr := startup.GetEnvWithDefault("LOG_PRIVATE_IPS_AS_USUAL", "false")
+	logPrivateIPsAsUsual = logPrivateIPsAsUsualStr == "1" || strings.EqualFold(logPrivateIPsAsUsualStr, "true") || strings.EqualFold(logPrivateIPsAsUsualStr, "yes")
+
 	// Comma-separated list of allowed fields, "" means all, " " means none
-	logsEnv := getEnvWithDefault("LOG_FILTER", "")
+	logsEnv := startup.GetEnvWithDefault("LOG_FILTER", "")
 
 	// Configure Host key cache TTL
-	hostKeyCacheTTLStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_TTL", "24h")
-	hostKeyCacheTTL, err := time.ParseDuration(hostKeyCacheTTLStr)
+	hostKeyCacheTTLStr := startup.GetEnvWithDefault("SSHD_HOST_KEY_CACHE_TTL", "24h")
+	hostKeyCacheTTL, err = time.ParseDuration(hostKeyCacheTTLStr)
 	if err != nil || hostKeyCacheTTL <= 0 {
 		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_TTL")
 	}
 
 	// Configure cache cleanup interval
-	hostKeyCacheCleanupStr := getEnvWithDefault("SSHD_HOST_KEY_CACHE_CLEANUP", "1h")
-	hostKeyCacheCleanup, err := time.ParseDuration(hostKeyCacheCleanupStr)
+	hostKeyCacheCleanupStr := startup.GetEnvWithDefault("SSHD_HOST_KEY_CACHE_CLEANUP", "1h")
+	hostKeyCacheCleanup, err = time.ParseDuration(hostKeyCacheCleanupStr)
 	if err != nil || hostKeyCacheCleanup <= 0 {
 		logrus.Fatal("Invalid SSHD_HOST_KEY_CACHE_CLEANUP")
 	}
@@ -1024,51 +1226,71 @@ func init() {
 	var abuseStartupFields logrus.Fields
 	abuseReporter, abuseStartupFields = abuse.Setup(abuse.Options{
 		Logger:    logger,
-		Getenv:    getEnvWithDefault,
+		Getenv:    startup.GetEnvWithDefault,
 		UserAgent: appName + "/" + appVersion,
 	})
 
 	// Optional REST endpoint with live statistics (disabled unless STATS_BIND is set).
-	statsBind = getEnvWithDefault("STATS_BIND", "")
-	statsToken = getEnvWithDefault("STATS_TOKEN", "")
+	statsBind = startup.GetEnvWithDefault("STATS_BIND", "")
+	statsToken = startup.GetEnvWithDefault("STATS_TOKEN", "")
+
+	// Build static ssh part for startup output
+	sshFields := logrus.Fields{
+		// Always displayed
+		"SSHD_BIND":    sshd_bind,
+		"SSHD_KEY_KEY": sshd_key_key,
+		"SSHD_RATE":    rate,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(sshFields, "SSHD_SEND_BANNER", sendBanner, false)
+	startup.AddIfNotDefault(sshFields, "SSHD_MAX_AUTH_TRIES", maxAuthTries, 6)
+	startup.AddIfNotDefault(sshFields, "SSHD_RSA_BITS", rsaBits, 3072)
+	startup.AddIfNotDefault(sshFields, "SSHD_PROFILE_SCOPE", profileScope, "host")
+	startup.AddIfNotDefault(sshFields, "SSHD_LOG_CLEAR_PASSWORD", logClearPassword, true)
+	startup.AddIfNotDefault(sshFields, "SSHD_HOST_KEY_CACHE_TTL", hostKeyCacheTTLStr, "24h")
+	startup.AddIfNotDefault(sshFields, "SSHD_HOST_KEY_CACHE_CLEANUP", hostKeyCacheCleanupStr, "1h")
+	startup.AddIfNotDefault(sshFields, "USE_EXACT_RATE", useExactRate, false)
+
+	// Build static telnet part for startup output
+	telnetFields := logrus.Fields{
+		"TELNET_BIND": telnetBind,
+		"TELNET_RATE": telnetRate,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(telnetFields, "TELNET_LOG_CLEAR_PASSWORD", telnetLogClearPassword, true)
+
+	// Build static Logging part for startup output
+	loggingFields := logrus.Fields{
+		"LOG_TO": logOut.Mode,
+	}
+	// Only displayed when different from defaults
+	if logOut.Mode != common.LogToConsole {
+		// The path only matters when a file is used. Its default is not "", so it cannot go through AddIfNotDefault.
+		loggingFields["LOG_FILE_PATH"] = logFilePath
+	}
+	startup.AddIfNotDefault(loggingFields, "LOG_FILTER", logsEnv, "")
+	startup.AddIfNotDefault(loggingFields, "LOG_PRIVATE_IPS_AS_USUAL", logPrivateIPsAsUsual, false)
+
+	// Build static Stats part for startup output
+	statsFields := logrus.Fields{
+		"STATS_TOKEN": statsToken != "", // never log the token itself
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(statsFields, "STATS_BIND", statsBind, "")
 
 	// Show Configuration on Startup
 	startupFields := logrus.Fields{
 		"app": logrus.Fields{
 			"version":     appVersion,
-			"build":       appBuild[:8],
+			"build":       shortBuild(appBuild),
 			"name":        appName,
 			"license":     appLicense,
 			"source_code": appSource,
 		},
-		"ssh": logrus.Fields{
-			"SSHD_BIND":                   sshd_bind,
-			"SSHD_KEY_KEY":                sshd_key_key,
-			"SSHD_RATE":                   rate,
-			"SSHD_MAX_AUTH_TRIES":         maxAuthTries,
-			"SSHD_RSA_BITS":               rsaBitsStr,
-			"SSHD_PROFILE_SCOPE":          profileScope,
-			"SSHD_SEND_BANNER":            sendBanner,
-			"SSHD_LOG_CLEAR_PASSWORD":     logClearPassword,
-			"SSHD_HOST_KEY_CACHE_TTL":     hostKeyCacheTTL.String(),
-			"SSHD_HOST_KEY_CACHE_CLEANUP": hostKeyCacheCleanup.String(),
-		},
-		"telnet": logrus.Fields{
-			"TELNET_BIND":               telnetBind,
-			"TELNET_LOG_CLEAR_PASSWORD": telnetLogClearPassword,
-			"TELNET_RATE":               telnetRate,
-		},
-		"stats": logrus.Fields{
-			"STATS_BIND":  statsBind,
-			"STATS_TOKEN": statsToken != "", // never log the token itself
-		},
-		"logging": logrus.Fields{
-			"LOG_TO":        logOut.Mode,
-			"LOG_FILE_PATH": logFilePath,
-			"LOG_FILTER":    logsEnv,
-
-			"LOG_PRIVATE_IPS_AS_USUAL": logPrivateIPsAsUsual,
-		},
+		"ssh":     sshFields,
+		"telnet":  telnetFields,
+		"stats":   statsFields,
+		"logging": loggingFields,
 	}
 	// Only show abuse reporting configuration when at least one backend is enabled.
 	for k, v := range abuseStartupFields {
@@ -1082,6 +1304,9 @@ func init() {
 	// Configure allowed log fields from environment variable
 	if logsEnv != "" {
 		allowedLogFields = common.ParseAllowedFields(logsEnv)
+		if len(allowedLogFields) == 0 {
+			logrus.Warn("LOG_FILTER has no usable field names; no structured fields will be logged")
+		}
 		logrus.SetFormatter(&common.FilteredJSONFormatter{
 			Allowed: allowedLogFields,
 			Base: &logrus.JSONFormatter{
@@ -1089,14 +1314,14 @@ func init() {
 			},
 		})
 	}
+}
 
-	logsEnv, isSet := os.LookupEnv("LOG_FILTER")
-	if isSet {
-		allowedLogFields = common.ParseAllowedFields(logsEnv)
-		if len(allowedLogFields) == 0 {
-			logrus.Warn("LOG_FILTER is set but empty; no structured fields will be logged")
-		}
+// shortBuild returns the first 8 characters of the build id (a commit hash), or all of it if it is shorter.
+func shortBuild(build string) string {
+	if len(build) > 8 {
+		return build[:8]
 	}
+	return build
 }
 
 func main() {
@@ -1108,20 +1333,24 @@ func main() {
 		if err != nil {
 			logrus.WithError(err).Fatal("Cannot start statistics endpoint (STATS_BIND)")
 		}
-		logrus.WithField("address", addr.String()).Info("Statistics endpoint listening on /stats")
+		logrus.WithField("address", addr.String()).Debug("Statistics endpoint listening on /stats")
 	}
 
 	// SSH listener
 	go func() {
 		socket, err := net.Listen("tcp", sshd_bind)
 		if err != nil {
-			panic(err)
+			logrus.WithError(err).Fatalf("Cannot listen for SSH on %s", sshd_bind)
 		}
 		// logrus.Infof("SSH listening on %s", sshd_bind)
 		for {
 			conn, err := socket.Accept()
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
 				logrus.WithError(err).Warn("SSH listener accept failed")
+				time.Sleep(acceptRetryDelay) // e.g. out of file descriptors: do not spin and flood the log
 				continue
 			}
 
@@ -1133,13 +1362,17 @@ func main() {
 	go func() {
 		telnetSocket, err := net.Listen("tcp", telnetBind)
 		if err != nil {
-			panic(err)
+			logrus.WithError(err).Fatalf("Cannot listen for Telnet on %s", telnetBind)
 		}
 		// logrus.Infof("Telnet listening on %s", telnetBind)
 		for {
 			conn, err := telnetSocket.Accept()
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
 				logrus.WithError(err).Warn("Telnet listener accept failed")
+				time.Sleep(acceptRetryDelay)
 				continue
 			}
 			go handleTelnetConnection(conn)

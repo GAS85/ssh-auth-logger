@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 )
 
@@ -100,6 +101,11 @@ type Flusher interface {
 	Flush()
 }
 
+// CooldownExempt is optionally implemented by a Backend that must not be held back by the per-IP cooldown (ABUSE_REPORT_INTERVAL). That cooldown protects services with a per-IP rate limit (AbuseIPDB accepts one report per IP every 15 minutes). A backend that collects log lines and sends them in batches (DShield) has no such limit, so it gets every window of ABUSE_REPORT_ATTEMPTS attempts, regardless of when the IP was last reported to other backends.
+type CooldownExempt interface {
+	IgnoresIPCooldown() bool
+}
+
 // PublicKeyReporter is optionally implemented by a Backend that may publish the fingerprints of the public keys offered by attackers. Public keys are not secret, so unlike passwords they need no sanitizing; a backend that does not implement this (or returns false) never receives them.
 type PublicKeyReporter interface {
 	ReportsPublicKeys() bool
@@ -134,10 +140,13 @@ type reputationEntry struct {
 
 // abuseIPState contains reporting state for one source IP.
 type abuseIPState struct {
+	// attempts and lastReported belong to the cooldown track: the backends that are subject to ABUSE_REPORT_INTERVAL. Attempts during the cooldown are not counted here.
 	attempts     int
-	protocol     string // protocol of the latest counted attempt, used if the report is sent on expiry
 	lastReported time.Time
-	lastSeen     time.Time
+	// exemptAttempts is the counter of the exempt track (see CooldownExempt). It is never paused by a cooldown.
+	exemptAttempts int
+	protocol       string // protocol of the latest counted attempt, used if the report is sent on expiry
+	lastSeen       time.Time
 	// creds[i] holds the credentials collected for backends[i].
 	creds [][]Credential
 }
@@ -147,6 +156,10 @@ type Manager struct {
 	mu sync.Mutex
 
 	backends []Backend
+	// exempt[i] is true if backends[i] ignores the per-IP cooldown (CooldownExempt). hasExempt / hasCooled tell whether either track has any backend at all.
+	exempt    []bool
+	hasExempt bool
+	hasCooled bool
 
 	attemptsLimit int
 	// minAttempts is the number of attempts that is enough for a report when the IP's state expires: abuseMinimumAttempts, but never more than attemptsLimit.
@@ -184,6 +197,7 @@ func NewManager(
 ) *Manager {
 	m := &Manager{
 		backends:      backends,
+		exempt:        make([]bool, len(backends)),
 		attemptsLimit: attemptsLimit,
 		reportEvery:   reportEvery,
 		cleanupEvery:  cleanupEvery,
@@ -198,6 +212,15 @@ func NewManager(
 	m.minAttempts = abuseMinimumAttempts
 	if attemptsLimit < m.minAttempts {
 		m.minAttempts = attemptsLimit
+	}
+
+	for i, b := range backends {
+		if ce, ok := b.(CooldownExempt); ok && ce.IgnoresIPCooldown() {
+			m.exempt[i] = true
+			m.hasExempt = true
+		} else {
+			m.hasCooled = true
+		}
 	}
 
 	for _, b := range backends {
@@ -301,67 +324,100 @@ func (m *Manager) record(ip, protocol, username, password, publicKey string) boo
 		state.creds[i] = addCredential(state.creds[i], c)
 	}
 
-	// If this IP has already been reported recently, don't accumulate another threshold during the cooldown period.
-	if !state.lastReported.IsZero() && now.Sub(state.lastReported) < m.reportEvery {
-		m.mu.Unlock()
-		return false
-	}
-
 	// An attempt with an empty username, an empty password and no public key (judged on the raw input, before any backend sanitizing) is still remembered above, but it does not count towards the report threshold and can never trigger a report on its own.
 	if username == "" && password == "" && publicKey == "" {
 		m.mu.Unlock()
 		return false
 	}
 
-	// An HTTP port scan attempt is skipped as well. Report shall not be send.
-	if username == "GET / HTTP/1.1" {
+	// Two tracks share the credential windows but count independently:
+	//  - exempt backends (CooldownExempt) report every attemptsLimit attempts, no cooldown;
+	//  - all others count only outside the per-IP cooldown, so an IP is reported to them at most once per ABUSE_REPORT_INTERVAL.
+	fire := make([]bool, len(m.backends))
+	fired := false
+
+	if m.hasExempt {
+		state.exemptAttempts++
+		state.protocol = protocol
+		if state.exemptAttempts >= m.attemptsLimit {
+			state.exemptAttempts = 0
+			m.markTrack(fire, true)
+			fired = true
+		}
+	}
+
+	if m.hasCooled {
+		if !state.lastReported.IsZero() && now.Sub(state.lastReported) < m.reportEvery {
+			logger.WithField("ip", ip).Debug("IP has already been reported and is in cooldown period")
+		} else {
+			state.attempts++
+			state.protocol = protocol
+			if state.attempts >= m.attemptsLimit {
+				// Mark the IP as reported BEFORE starting the goroutines.
+				// If several authentication attempts arrive concurrently, only one of them should schedule a report.
+				state.lastReported = now
+				state.attempts = 0
+				m.markTrack(fire, false)
+				fired = true
+			}
+		}
+	}
+
+	if !fired {
 		m.mu.Unlock()
 		return false
 	}
 
-	state.attempts++
-	state.protocol = protocol
-
-	if state.attempts < m.attemptsLimit {
-		m.mu.Unlock()
-		return false
-	}
-
-	// Copy data before releasing the mutex, then reset it for the next window.
+	// Copy data before releasing the mutex, then reset the window of every backend that is reported now.
 	snapshots := make([][]Credential, len(m.backends))
 	for i := range m.backends {
-		snapshots[i] = append([]Credential(nil), state.creds[i]...)
-		state.creds[i] = nil
+		if fire[i] {
+			snapshots[i] = append([]Credential(nil), state.creds[i]...)
+			state.creds[i] = nil
+		}
 	}
-
-	// Mark the IP as reported BEFORE starting the goroutines.
-	// If several authentication attempts arrive concurrently, only one of them should schedule a report.
-	state.lastReported = now
-	state.attempts = 0
 
 	m.mu.Unlock()
-
-	names := make([]string, len(m.backends))
-	for i, b := range m.backends {
-		names[i] = b.Name()
-	}
 
 	logger.WithFields(logrus.Fields{
 		"ip":       ip,
 		"protocol": protocol,
 		"attempts": m.attemptsLimit,
-		"backends": strings.Join(names, ","),
+		"backends": m.backendNames(fire),
 	}).Infof("Abuse: report threshold reached for %s. Report IP.", ip)
 
-	m.dispatch(ip, protocol, snapshots)
+	m.dispatch(ip, protocol, snapshots, fire)
 
 	return true
 }
 
-// dispatch hands one report to every backend, each in its own goroutine. creds[i] belongs to backends[i]. The caller must not hold mu.
-func (m *Manager) dispatch(ip, protocol string, creds [][]Credential) {
+// markTrack sets mask[i] for every backend of the exempt track (exempt true) or of the cooldown track (exempt false).
+func (m *Manager) markTrack(mask []bool, exempt bool) {
+	for i := range m.backends {
+		if m.exempt[i] == exempt {
+			mask[i] = true
+		}
+	}
+}
+
+// backendNames joins the names of the backends selected by mask.
+func (m *Manager) backendNames(mask []bool) string {
+	var names []string
+	for i, b := range m.backends {
+		if mask[i] {
+			names = append(names, b.Name())
+		}
+	}
+	return strings.Join(names, ",")
+}
+
+// dispatch hands one report to every backend selected by mask, each in its own goroutine. creds[i] belongs to backends[i]. The caller must not hold mu.
+func (m *Manager) dispatch(ip, protocol string, creds [][]Credential, mask []bool) {
 	m.reportsTriggered.Add(1)
 	for i, b := range m.backends {
+		if !mask[i] {
+			continue
+		}
 		m.sent[i].Add(1)
 		m.inflight.Add(1)
 		go func(b Backend, rep Report) {
@@ -371,46 +427,68 @@ func (m *Manager) dispatch(ip, protocol string, creds [][]Credential) {
 	}
 }
 
-// pendingReport is a report for an IP that did not reach the threshold but made enough attempts.
+// pendingReport is a report for an IP that did not reach the threshold but made enough attempts. mask selects the backends it is for.
 type pendingReport struct {
 	ip, protocol string
 	attempts     int
 	creds        [][]Credential
+	mask         []bool
 }
 
-// takeUnreported returns a report for every IP that was never reported, has made at least minAttempts attempts and is accepted by include. These IPs are marked as reported, with an empty window, so the same data is never sent twice. The caller must hold mu, and sends the result with sendPending after releasing it.
+// takeUnreported returns the reports for IPs that have collected at least minAttempts attempts since their last report (or ever) without reaching the threshold, and that are accepted by include. The counters and credential windows of what is returned are reset, so the same data is never sent twice.
+//
+// Exempt backends (CooldownExempt) are served whenever their own counter is high enough. The others only if the IP's cooldown has elapsed, because a service with a per-IP rate limit would reject the report. The caller must hold mu, and sends the result with sendPending after releasing it.
 func (m *Manager) takeUnreported(now time.Time, include func(*abuseIPState) bool) []pendingReport {
 	var out []pendingReport
 	for ip, state := range m.ips {
-		if !state.lastReported.IsZero() || state.attempts < m.minAttempts || !include(state) {
+		if !include(state) {
 			continue
 		}
-		out = append(out, pendingReport{ip, state.protocol, state.attempts, state.creds})
-		state.creds = make([][]Credential, len(m.backends))
-		state.lastReported = now
-		state.attempts = 0
+
+		if m.hasExempt && state.exemptAttempts >= m.minAttempts {
+			out = append(out, m.takeTrack(state, ip, state.exemptAttempts, true))
+			state.exemptAttempts = 0
+		}
+
+		cooledDown := state.lastReported.IsZero() || now.Sub(state.lastReported) >= m.reportEvery
+		if m.hasCooled && state.attempts >= m.minAttempts && cooledDown {
+			out = append(out, m.takeTrack(state, ip, state.attempts, false))
+			state.attempts = 0
+			state.lastReported = now
+		}
 	}
 	return out
 }
 
+// takeTrack moves the credential windows of one track out of state.
+func (m *Manager) takeTrack(state *abuseIPState, ip string, attempts int, exempt bool) pendingReport {
+	r := pendingReport{
+		ip: ip, protocol: state.protocol, attempts: attempts,
+		creds: make([][]Credential, len(m.backends)),
+		mask:  make([]bool, len(m.backends)),
+	}
+	m.markTrack(r.mask, exempt)
+	for i := range m.backends {
+		if r.mask[i] {
+			r.creds[i] = state.creds[i]
+			state.creds[i] = nil
+		}
+	}
+	return r
+}
+
 // sendPending logs and dispatches reports from takeUnreported. why completes the log message. The caller must not hold mu.
 func (m *Manager) sendPending(log *logrus.Entry, why string, list []pendingReport) {
-	names := make([]string, len(m.backends))
-	for i, b := range m.backends {
-		names[i] = b.Name()
-	}
-	backends := strings.Join(names, ",")
-
 	for _, r := range list {
 		log.WithFields(logrus.Fields{
 			"ip":       r.ip,
 			"protocol": r.protocol,
 			"attempts": r.attempts,
 			"minimum":  m.minAttempts,
-			"backends": backends,
+			"backends": m.backendNames(r.mask),
 		}).Infof("Abuse: %s %s with enough attempts but no report yet. Report IP.", why, r.ip)
 
-		m.dispatch(r.ip, r.protocol, r.creds)
+		m.dispatch(r.ip, r.protocol, r.creds, r.mask)
 	}
 }
 
@@ -629,23 +707,27 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 
 	var err error
 
-	abuseAttempts, err = strconv.Atoi(getenv("ABUSE_REPORT_ATTEMPTS", "10"))
+	abuseAttemptsStr := getenv("ABUSE_REPORT_ATTEMPTS", "10")
+	abuseAttempts, err = strconv.Atoi(abuseAttemptsStr)
 	if err != nil || abuseAttempts <= 0 {
 		logrus.Fatal("Invalid ABUSE_REPORT_ATTEMPTS environment variable")
 	}
 
 	// AbuseIPDB allows one report per IP every 15 minutes: https://www.abuseipdb.com/api.html
-	abuseReportInterval, err = time.ParseDuration(getenv("ABUSE_REPORT_INTERVAL", "15m"))
+	abuseReportIntervalStr := getenv("ABUSE_REPORT_INTERVAL", "15m")
+	abuseReportInterval, err = time.ParseDuration(abuseReportIntervalStr)
 	if err != nil || abuseReportInterval <= 0 {
 		logrus.Fatal("Invalid ABUSE_REPORT_INTERVAL environment variable")
 	}
 
-	abuseCleanupInterval, err = time.ParseDuration(getenv("ABUSE_CLEANUP_INTERVAL", "30m"))
+	abuseCleanupIntervalStr := getenv("ABUSE_CLEANUP_INTERVAL", "30m")
+	abuseCleanupInterval, err = time.ParseDuration(abuseCleanupIntervalStr)
 	if err != nil || abuseCleanupInterval <= 0 {
 		logrus.Fatal("Invalid ABUSE_CLEANUP_INTERVAL environment variable")
 	}
 
-	abuseStateExpiry, err = time.ParseDuration(getenv("ABUSE_STATE_EXPIRY", "2h"))
+	abuseStateExpiryStr := getenv("ABUSE_STATE_EXPIRY", "2h")
+	abuseStateExpiry, err = time.ParseDuration(abuseStateExpiryStr)
 	if err != nil || abuseStateExpiry <= 0 {
 		logrus.Fatal("Invalid ABUSE_STATE_EXPIRY environment variable")
 	}
@@ -653,12 +735,12 @@ func Setup(opts Options) (*Manager, logrus.Fields) {
 	var backends []Backend
 	fields := logrus.Fields{}
 
-	abuseFields := logrus.Fields{
-		"ABUSE_REPORT_ATTEMPTS":  abuseAttempts,
-		"ABUSE_REPORT_INTERVAL":  abuseReportInterval.String(),
-		"ABUSE_CLEANUP_INTERVAL": abuseCleanupInterval.String(),
-		"ABUSE_STATE_EXPIRY":     abuseStateExpiry.String(),
-	}
+	abuseFields := logrus.Fields{}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(abuseFields, "ABUSE_REPORT_ATTEMPTS", abuseAttempts, 10)
+	startup.AddIfNotDefault(abuseFields, "ABUSE_REPORT_INTERVAL", abuseReportIntervalStr, "15m")
+	startup.AddIfNotDefault(abuseFields, "ABUSE_CLEANUP_INTERVAL", abuseCleanupIntervalStr, "30m")
+	startup.AddIfNotDefault(abuseFields, "ABUSE_STATE_EXPIRY", abuseStateExpiryStr, "2h")
 
 	for _, factory := range abuseBackendFactories {
 		b, f := factory()

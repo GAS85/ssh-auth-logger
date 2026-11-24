@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 )
 
@@ -90,16 +91,20 @@ func newAbuseIPDBFromEnv() (Backend, logrus.Fields) {
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 
+	// Build static part for startup output
+	abuseipdbFields := logrus.Fields{
+		"ABUSEIPDB_ENABLED": true,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(abuseipdbFields, "ABUSEIPDB_SSH_CATEGORIES", b.sshCategories, "18,22")
+	startup.AddIfNotDefault(abuseipdbFields, "ABUSEIPDB_TELNET_CATEGORIES", b.telnetCategories, "14,18,23")
+	startup.AddIfNotDefault(abuseipdbFields, "ABUSEIPDB_REPORT_CLEAR_USERNAME", b.reportClearUsername, false)
+	startup.AddIfNotDefault(abuseipdbFields, "ABUSEIPDB_REPORT_CLEAR_PASSWORD", b.reportClearPassword, false)
+	startup.AddIfNotDefault(abuseipdbFields, "ABUSEIPDB_REPORT_HASHED_PASSWORD", b.reportHashedPassword, true)
+	startup.AddIfNotDefault(abuseipdbFields, "ABUSEIPDB_IP_CHECK", b.checkIP, false)
+
 	return b, logrus.Fields{
-		"abuseipdb": logrus.Fields{
-			"ABUSEIPDB_ENABLED":                true,
-			"ABUSEIPDB_SSH_CATEGORIES":         b.sshCategories,
-			"ABUSEIPDB_TELNET_CATEGORIES":      b.telnetCategories,
-			"ABUSEIPDB_REPORT_CLEAR_USERNAME":  b.reportClearUsername,
-			"ABUSEIPDB_REPORT_CLEAR_PASSWORD":  b.reportClearPassword,
-			"ABUSEIPDB_REPORT_HASHED_PASSWORD": b.reportHashedPassword,
-			"ABUSEIPDB_IP_CHECK":               b.checkIP,
-		},
+		"abuseipdb": abuseipdbFields,
 	}
 }
 

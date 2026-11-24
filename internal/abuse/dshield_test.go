@@ -686,18 +686,14 @@ func TestNewDShieldFromEnv_Defaults(t *testing.T) {
 		t.Fatalf("fields[dshield] = %T, want logrus.Fields", fields["dshield"])
 	}
 
-	if dshieldFields["DSHIELD_USERID"] != "42" ||
-		dshieldFields["DSHIELD_BATCH_SIZE"] != 50 ||
-		dshieldFields["DSHIELD_BATCH_INTERVAL"] != "10m0s" {
+	// The user id has no default, so it is always shown; everything else is at its default.
+	if len(dshieldFields) != 2 ||
+		dshieldFields["DSHIELD_ENABLED"] != true ||
+		dshieldFields["DSHIELD_USERID"] != "42" {
 		t.Errorf("dshield fields = %v", dshieldFields)
 	}
-
-	if dshieldFields["DSHIELD_DEBUG"] != false ||
-		dshieldFields["DSHIELD_ENABLED"] != true ||
-		dshieldFields["DSHIELD_REPORT_CLEAR_USERNAME"] != true ||
-		dshieldFields["DSHIELD_REPORT_CLEAR_PASSWORD"] != true ||
-		dshieldFields["DSHIELD_REPORT_HASHED_PASSWORD"] != false {
-		t.Errorf("dshield fields = %v", dshieldFields)
+	if _, wrongSection := fields["abuseipdb"]; wrongSection {
+		t.Error("DShield must not report its fields under the abuseipdb key")
 	}
 
 	for k, v := range dshieldFields {

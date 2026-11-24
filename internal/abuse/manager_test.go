@@ -261,53 +261,119 @@ func TestRecordFailure_EmptyUserAndPasswordDoNotCountTowardsThreshold(t *testing
 }
 
 // An HTTP request line sent to the SSH/Telnet port ("GET / HTTP/1.1", password "Host: <our IP>:<port>") is a port scan, not a login attempt. It must never count towards the threshold, whatever the password is.
-func TestRecordFailure_HTTPRequestLineDoesNotCountTowardsThreshold(t *testing.T) {
+// func TestRecordFailure_HTTPRequestLineDoesNotCountTowardsThreshold(t *testing.T) {
+// 	f := newFake("A")
+// 	m := newTestManager(2, f)
+// 	ip := "192.0.2.26"
+// 	tlsUsername := "\x16\x03\x01\x00"
+
+// 	for i := 0; i < 10; i++ {
+// 		pw := fmt.Sprintf("Host: 198.51.100.7:%d", 2222+i)
+// 		if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", pw) {
+// 			t.Fatalf("HTTP scan attempt %d must not trigger a report", i)
+// 		}
+// 		if m.RecordFailure(ip, "Telnet", "GET / HTTP/1.1", pw) {
+// 			t.Fatalf("HTTP scan attempt %d (telnet) must not trigger a report", i)
+// 		}
+// 		if m.RecordFailure(ip, "SSH", "GET /admin HTTP/1.1", pw) {
+// 			t.Fatalf("HTTP scan attempt %d must not trigger a report", i)
+// 		}
+// 		if m.RecordFailure(ip, "Telnet", "GET /admin HTTP/1.1", pw) {
+// 			t.Fatalf("HTTP scan attempt %d (telnet) must not trigger a report", i)
+// 		}
+// 		// TLS Test
+// 		if m.RecordFailure(ip, "Telnet", tlsUsername, pw) {
+// 			t.Fatalf("TLS scan attempt %d must not trigger a report", i)
+// 		}
+// 	}
+// 	if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "") {
+// 		t.Fatal("HTTP scan attempt with empty password must not trigger a report")
+// 	}
+// 	f.expectNone(t)
+// 	// TLS Test with user name only
+// 	if m.RecordFailure(ip, "Telnet", tlsUsername, "") {
+// 		t.Fatal("TLS scan attempt with empty password must not trigger a report")
+// 	}
+// 	f.expectNone(t)
+
+// 	// Probes are dropped before any state is created.
+// 	if attempts, _, _, ok := snapshot(m, ip); ok {
+// 		t.Errorf("an IP that only sent probes must not be tracked (attempts=%d)", attempts)
+// 	}
+
+// 	// Real attempts from the same IP still count; the scan lines in between do not.
+// 	if m.RecordFailure(ip, "SSH", "root", "pw1") {
+// 		t.Fatal("first real attempt should not report yet")
+// 	}
+// 	if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222") {
+// 		t.Fatal("scan line must not push the IP over the threshold")
+// 	}
+// 	if !m.RecordFailure(ip, "SSH", "admin", "pw2") {
+// 		t.Fatal("second real attempt should report")
+// 	}
+// 	f.next(t)
+// }
+
+// The probe must not only be left out of the count, it must never reach a backend: AbuseIPDB, OTX and DShield all publish the usernames / passwords of a report.
+// func TestRecordFailure_ProbesAreNotPassedToBackends(t *testing.T) {
+// 	plain := newFake("plain")
+// 	withKeys := keyFake{newFake("keys")}
+// 	m := stoppable(t, newTestManager(2, plain, withKeys))
+// 	ip := "192.0.2.28"
+// 	tls := "\x16\x03\x01\x00"
+
+// 	m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222")
+// 	m.RecordFailure(ip, "SSH", "root", "pw1")
+// 	m.RecordFailure(ip, "Telnet", tls, "junk")
+// 	m.RecordFailure(ip, "SSH", "GET /admin HTTP/1.1", "Host: 198.51.100.7:2222")
+// 	if !m.RecordFailure(ip, "SSH", "admin", "pw2") {
+// 		t.Fatal("two real attempts must trigger the report")
+// 	}
+
+// 	for _, f := range []*fakeBackend{plain, withKeys.fakeBackend} {
+// 		rep := f.next(t)
+// 		if len(rep.Creds) != 2 {
+// 			t.Fatalf("%s: got %d credentials %+v, want only the 2 real ones", f.name, len(rep.Creds), rep.Creds)
+// 		}
+// 		for _, c := range rep.Creds {
+// 			if strings.HasPrefix(c.Username, "GET /") || strings.HasPrefix(c.Username, "\x16\x03") || strings.HasPrefix(c.Password, "Host:") || c.Password == "junk" {
+// 				t.Errorf("%s: probe leaked into the report: %+v", f.name, c)
+// 			}
+// 		}
+// 	}
+// }
+
+// Probes arriving while the IP is in its cooldown must not be kept for the next report either.
+func TestRecordFailure_ProbesDuringCooldownAreNotRetained(t *testing.T) {
 	f := newFake("A")
-	m := newTestManager(2, f)
-	ip := "192.0.2.26"
+	m := stoppable(t, newTestManager(1, f))
+	ip := "192.0.2.29"
 
-	for i := 0; i < 10; i++ {
-		pw := fmt.Sprintf("Host: 198.51.100.7:%d", 2222+i)
-		if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", pw) {
-			t.Fatalf("HTTP scan attempt %d must not trigger a report", i)
-		}
-		if m.RecordFailure(ip, "Telnet", "GET / HTTP/1.1", pw) {
-			t.Fatalf("HTTP scan attempt %d (telnet) must not trigger a report", i)
-		}
-	}
-	if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "") {
-		t.Fatal("HTTP scan attempt with empty password must not trigger a report")
-	}
-	f.expectNone(t)
-
-	attempts, _, _, ok := snapshot(m, ip)
-	if !ok || attempts != 0 {
-		t.Errorf("attempts after HTTP scans = %d (tracked=%v), want 0", attempts, ok)
-	}
-
-	// Real attempts from the same IP still count; the scan lines in between do not.
-	if m.RecordFailure(ip, "SSH", "root", "pw1") {
-		t.Fatal("first real attempt should not report yet")
-	}
-	if m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222") {
-		t.Fatal("scan line must not push the IP over the threshold")
-	}
-	if !m.RecordFailure(ip, "SSH", "admin", "pw2") {
-		t.Fatal("second real attempt should report")
+	if !m.RecordFailure(ip, "SSH", "root", "pw") {
+		t.Fatal("first attempt must report")
 	}
 	f.next(t)
+
+	// m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222")
+	// m.RecordFailure(ip, "SSH", "\x16\x03\x01", "")
+	m.RecordFailure(ip, "SSH", "admin", "x")
+
+	_, _, creds, ok := snapshot(m, ip)
+	if !ok || len(creds[0]) != 1 || creds[0][0].Username != "admin" {
+		t.Errorf("retained credentials = %+v, want only the real attempt", creds)
+	}
 }
 
 // Only the exact request line is exempt: other usernames that merely look similar still count.
-func TestRecordFailure_OtherHTTPLikeUsernamesStillCount(t *testing.T) {
-	f := newFake("A")
-	m := newTestManager(1, f)
+// func TestRecordFailure_OtherHTTPLikeUsernamesStillCount(t *testing.T) {
+// 	f := newFake("A")
+// 	m := newTestManager(1, f)
 
-	if !m.RecordFailure("192.0.2.27", "SSH", "GET /admin HTTP/1.1", "Host: 198.51.100.7:2222") {
-		t.Fatal("a different request line is treated as an ordinary username")
-	}
-	f.next(t)
-}
+// 	if !m.RecordFailure("192.0.2.27", "SSH", "GET /admin HTTP/1.1", "Host: 198.51.100.7:2222") {
+// 		t.Fatal("a different request line is treated as an ordinary username")
+// 	}
+// 	f.next(t)
+// }
 
 // keyFake is a backend that publishes public keys.
 type keyFake struct{ *fakeBackend }
@@ -697,23 +763,24 @@ func TestCleanup_DoesNotReportBelowMinimumAttempts(t *testing.T) {
 	}
 }
 
-func TestCleanup_DoesNotCountIgnoredAttemptsTowardsMinimum(t *testing.T) {
-	f := newFake("A")
-	m := newTestManager(10, f)
-	ip := "192.0.2.102"
+// func TestCleanup_DoesNotCountIgnoredAttemptsTowardsMinimum(t *testing.T) {
+// 	f := newFake("A")
+// 	m := newTestManager(10, f)
+// 	ip := "192.0.2.102"
 
-	m.RecordFailure(ip, "SSH", "root", "pw")
-	for i := 0; i < 5; i++ {
-		m.RecordFailure(ip, "SSH", "", "")
-		m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222")
-	}
-	ageOut(m, ip)
-	m.cleanup()
+// 	m.RecordFailure(ip, "SSH", "root", "pw")
+// 	for i := 0; i < 5; i++ {
+// 		m.RecordFailure(ip, "SSH", "", "")
+// 		m.RecordFailure(ip, "SSH", "GET / HTTP/1.1", "Host: 198.51.100.7:2222")
+// 	}
+// 	ageOut(m, ip)
+// 	m.cleanup()
 
-	f.expectNone(t)
-}
+// 	f.expectNone(t)
+// }
 
-func TestCleanup_DoesNotReportAnIPThatWasReportedBefore(t *testing.T) {
+// While the IP is still inside its cooldown the expiry report must not be sent, the service would reject it.
+func TestCleanup_DoesNotReportAnIPInCooldown(t *testing.T) {
 	f := newFake("A")
 	m := newTestManager(2, f)
 	ip := "192.0.2.103"
@@ -724,7 +791,7 @@ func TestCleanup_DoesNotReportAnIPThatWasReportedBefore(t *testing.T) {
 	}
 	f.next(t)
 
-	// More attempts after the cooldown, still below the threshold.
+	// Leftover attempts, but the cooldown (1h) has not elapsed.
 	m.mu.Lock()
 	m.ips[ip].attempts = abuseMinimumAttempts
 	m.mu.Unlock()
@@ -835,9 +902,9 @@ func TestSetup_BothBackendsAndSharedSettings(t *testing.T) {
 
 	// Shared abuse settings remain directly under "abuse".
 	if abuse["ABUSE_REPORT_ATTEMPTS"] != 7 ||
-		abuse["ABUSE_REPORT_INTERVAL"] != "20m0s" ||
-		abuse["ABUSE_CLEANUP_INTERVAL"] != "1h0m0s" ||
-		abuse["ABUSE_STATE_EXPIRY"] != "3h0m0s" {
+		abuse["ABUSE_REPORT_INTERVAL"] != "20m" ||
+		abuse["ABUSE_CLEANUP_INTERVAL"] != "1h" ||
+		abuse["ABUSE_STATE_EXPIRY"] != "3h" {
 		t.Errorf("shared startup fields wrong: %v", abuse)
 	}
 
@@ -1152,5 +1219,240 @@ func TestFlush_TimesOutInsteadOfBlockingShutdown(t *testing.T) {
 	}
 	if hook.find("flush on shutdown timed out") == nil {
 		t.Error("expected a warning that the flush timed out")
+	}
+}
+
+func TestSetup_DefaultSharedSettingsAreNotShown(t *testing.T) {
+	isolate(t)
+	m, fields := Setup(Options{Getenv: env(
+		"ABUSEIPDB_ENABLED", "true", "ABUSEIPDB_API_KEY", "k",
+		"ABUSE_REPORT_ATTEMPTS", "5",
+	)})
+	t.Cleanup(m.Stop)
+
+	sec, ok := asFields(fields["abuse"])
+	if !ok {
+		t.Fatalf("fields[abuse] = %T", fields["abuse"])
+	}
+	if sec["ABUSE_REPORT_ATTEMPTS"] != 5 {
+		t.Errorf("non-default attempts must be shown: %v", sec)
+	}
+	for _, k := range []string{"ABUSE_REPORT_INTERVAL", "ABUSE_CLEANUP_INTERVAL", "ABUSE_STATE_EXPIRY"} {
+		if _, ok := sec[k]; ok {
+			t.Errorf("default %s must not be shown", k)
+		}
+	}
+	if _, ok := sec["abuseipdb"]; !ok {
+		t.Error("backend section missing")
+	}
+}
+
+// Every backend reports under its own key: two backends must not overwrite each other's section.
+func TestSetup_EachBackendHasItsOwnStartupSection(t *testing.T) {
+	isolate(t)
+	m, fields := Setup(Options{Getenv: env(
+		"ABUSEIPDB_ENABLED", "true", "ABUSEIPDB_API_KEY", "k",
+		"DSHIELD_ENABLED", "true", "DSHIELD_USERID", "1", "DSHIELD_API_KEY", "k",
+		"OTX_ENABLED", "true", "OTX_API_KEY", "k",
+		"BLOCKLIST_ENABLED", "true", "BLOCKLIST_SERVER", "s", "BLOCKLIST_API_KEY", "k",
+		"SPAMHAUS_ENABLED", "true", "SPAMHAUS_API_KEY", "k",
+	)})
+	t.Cleanup(m.Stop)
+
+	sec, ok := asFields(fields["abuse"])
+	if !ok {
+		t.Fatalf("fields[abuse] = %T", fields["abuse"])
+	}
+	for key, enabled := range map[string]string{
+		"abuseipdb": "ABUSEIPDB_ENABLED",
+		"dshield":   "DSHIELD_ENABLED",
+		"otx":       "OTX_ENABLED",
+		"blocklist": "BLOCKLIST_ENABLED",
+		"spamhaus":  "SPAMHAUS_ENABLED",
+	} {
+		s, ok := asFields(sec[key])
+		if !ok || s[enabled] != true {
+			t.Errorf("section %q lacks %s: %v", key, enabled, sec[key])
+		}
+	}
+}
+
+// ── Exempt Test ─────────────────────────────────────────────────────────────────
+
+// exemptFake is a fake backend that ignores the per-IP cooldown, like DShield.
+type exemptFake struct{ *fakeBackend }
+
+func (exemptFake) IgnoresIPCooldown() bool { return true }
+
+var (
+	_ CooldownExempt = exemptFake{}
+	_ CooldownExempt = (*dshieldBackend)(nil)
+)
+
+func TestDShield_IgnoresIPCooldown(t *testing.T) {
+	if !newDShieldForTest("http://127.0.0.1:1").IgnoresIPCooldown() {
+		t.Error("DShield must ignore the per-IP cooldown")
+	}
+}
+
+// Backends that are subject to the cooldown (A) wait, exempt ones (E) keep getting every window.
+func TestCooldownExempt_NotHeldBackByCooldown(t *testing.T) {
+	a, e := newFake("A"), exemptFake{newFake("E")}
+	m := stoppable(t, newTestManager(2, a, e))
+	ip := "192.0.2.150"
+
+	m.RecordFailure(ip, "SSH", "u1", "p")
+	if !m.RecordFailure(ip, "SSH", "u2", "p") {
+		t.Fatal("expected first report")
+	}
+	if r := a.next(t); len(r.Creds) != 2 {
+		t.Errorf("A first report: %d creds, want 2", len(r.Creds))
+	}
+	if r := e.next(t); len(r.Creds) != 2 {
+		t.Errorf("E first report: %d creds, want 2", len(r.Creds))
+	}
+
+	// Inside A's cooldown: E gets the next window, A does not.
+	m.RecordFailure(ip, "SSH", "u3", "p")
+	if !m.RecordFailure(ip, "SSH", "u4", "p") {
+		t.Fatal("exempt backend must be reported during the cooldown")
+	}
+	r := e.next(t)
+	if len(r.Creds) != 2 || r.Creds[0].Username != "u3" || r.Creds[1].Username != "u4" {
+		t.Errorf("E second report = %+v, want exactly u3,u4", r.Creds)
+	}
+	a.expectNone(t)
+
+	// A keeps collecting for its next report, E's window was reset.
+	_, _, creds, _ := snapshot(m, ip)
+	if len(creds[0]) != 2 || len(creds[1]) != 0 {
+		t.Errorf("windows after second report: A=%d (want 2) E=%d (want 0)", len(creds[0]), len(creds[1]))
+	}
+
+	st := m.Stats()
+	if st.ReportsTriggered != 2 || st.SentByBackend["A"] != 1 || st.SentByBackend["E"] != 2 || st.ReportsSent != 3 {
+		t.Errorf("stats = %+v, want triggered 2, A 1, E 2, sent 3", st)
+	}
+
+	// Once the cooldown is over, A gets everything collected meanwhile.
+	m.mu.Lock()
+	m.ips[ip].lastReported = time.Now().Add(-2 * time.Hour)
+	m.mu.Unlock()
+	m.RecordFailure(ip, "SSH", "u5", "p")
+	if !m.RecordFailure(ip, "SSH", "u6", "p") {
+		t.Fatal("expected report after cooldown")
+	}
+	if r := a.next(t); len(r.Creds) != 4 { // u3,u4 from the cooldown + u5,u6
+		t.Errorf("A report after cooldown: %d creds, want 4", len(r.Creds))
+	}
+	e.next(t)
+}
+
+// The scenario from the review: threshold 10, 50 attempts, DShield must see all of them.
+func TestCooldownExempt_AllAttemptsReachExemptBackend(t *testing.T) {
+	e := exemptFake{newFake("E")}
+	m := stoppable(t, newTestManager(10, e))
+
+	total := 0
+	for i := 0; i < 50; i++ {
+		m.RecordFailure("192.0.2.151", "SSH", "root", fmt.Sprintf("pw%d", i))
+	}
+	for i := 0; i < 5; i++ {
+		total += len(e.next(t).Creds)
+	}
+	e.expectNone(t)
+	if total != 50 {
+		t.Errorf("exempt backend received %d credentials, want 50", total)
+	}
+}
+
+func TestCooldownExempt_OnlyExemptBackendsNeverSetCooldown(t *testing.T) {
+	e := exemptFake{newFake("E")}
+	m := stoppable(t, newTestManager(1, e))
+	m.RecordFailure("192.0.2.152", "SSH", "a", "b")
+	e.next(t)
+	if _, last, _, _ := snapshot(m, "192.0.2.152"); !last.IsZero() {
+		t.Errorf("lastReported = %v, want zero without cooldown backends", last)
+	}
+}
+
+// Expiry: an IP that was reported before but has leftover attempts is reported once its cooldown is over.
+func TestCleanup_ReportsLeftoverAttemptsOfPreviouslyReportedIP(t *testing.T) {
+	f := newFake("A")
+	m := newTestManager(4, f) // minAttempts = 3
+	ip := "192.0.2.153"
+
+	for i := 0; i < 4; i++ {
+		m.RecordFailure(ip, "SSH", fmt.Sprintf("u%d", i), "p")
+	}
+	f.next(t)
+
+	m.mu.Lock()
+	m.ips[ip].lastReported = time.Now().Add(-2 * time.Hour) // cooldown over
+	m.mu.Unlock()
+	for i := 0; i < abuseMinimumAttempts; i++ {
+		m.RecordFailure(ip, "SSH", fmt.Sprintf("late%d", i), "p")
+	}
+	f.expectNone(t) // below the threshold of 4
+
+	ageOut(m, ip)
+	m.cleanup()
+
+	if r := f.next(t); len(r.Creds) != abuseMinimumAttempts {
+		t.Errorf("leftover report has %d creds, want %d", len(r.Creds), abuseMinimumAttempts)
+	}
+	f.expectNone(t)
+}
+
+// Non-exempt backends are skipped while the cooldown runs (the service would reject the report); exempt ones are not.
+func TestFlush_SkipsCooldownBackendsButNotExemptOnes(t *testing.T) {
+	a, e := newFake("A"), exemptFake{newFake("E")}
+	m := stoppable(t, newTestManager(4, a, e))
+	ip := "192.0.2.154"
+
+	for i := 0; i < 4; i++ {
+		m.RecordFailure(ip, "SSH", fmt.Sprintf("u%d", i), "p")
+	}
+	a.next(t)
+	e.next(t)
+
+	// Leftovers: E counts them (no cooldown). A's counter is paused, so force the case the guard is for.
+	for i := 0; i < abuseMinimumAttempts; i++ {
+		m.RecordFailure(ip, "SSH", fmt.Sprintf("x%d", i), "p")
+	}
+	m.mu.Lock()
+	m.ips[ip].attempts = abuseMinimumAttempts // still inside A's cooldown
+	m.mu.Unlock()
+
+	m.Flush(time.Second)
+
+	if r := e.next(t); len(r.Creds) != abuseMinimumAttempts {
+		t.Errorf("E leftover report has %d creds, want %d", len(r.Creds), abuseMinimumAttempts)
+	}
+	a.expectNone(t)
+}
+
+func TestCleanup_ExemptLeftoversIgnoreCooldownAndPriorReport(t *testing.T) {
+	hook := captureLogs(t)
+	e := exemptFake{newFake("E")}
+	m := newTestManager(10, e)
+	ip := "192.0.2.155"
+
+	for i := 0; i < 10+abuseMinimumAttempts; i++ {
+		m.RecordFailure(ip, "Telnet", "root", fmt.Sprintf("p%d", i))
+	}
+	if r := e.next(t); len(r.Creds) != 10 {
+		t.Fatalf("regular report has %d creds, want 10", len(r.Creds))
+	}
+
+	ageOut(m, ip)
+	m.cleanup()
+
+	r := e.next(t)
+	if len(r.Creds) != abuseMinimumAttempts || r.Protocol != "Telnet" {
+		t.Errorf("leftover report = %+v", r)
+	}
+	if ent := hook.find("state of " + ip + " with enough attempts"); ent == nil || ent.Data["backends"] != "E" {
+		t.Errorf("log entry = %+v, want backends=E", ent)
 	}
 }

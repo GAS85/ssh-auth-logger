@@ -225,6 +225,86 @@ func TestBlocklistDe_BuildLogsWithoutCredentialsStillHasOneLine(t *testing.T) {
 	}
 }
 
+// ── public keys ──────────────────────────────────────────────────────────────
+
+var _ PublicKeyReporter = (*blocklistDeBackend)(nil)
+
+func TestBlocklistDe_ReportsPublicKeys(t *testing.T) {
+	if !newBlocklistDeForTest(nil).ReportsPublicKeys() {
+		t.Error("public key fingerprints are not secret and must be reported")
+	}
+}
+
+func TestBlocklistDe_BuildLogsCarriesPublicKey(t *testing.T) {
+	b := newBlocklistDeForTest(nil)
+	logs := b.buildLogs(Report{IP: "198.51.100.9", Protocol: "SSH", Creds: []Credential{
+		{Time: time.Now(), Username: "root", PublicKey: "ssh-ed25519 SHA256:abc"},
+		{Time: time.Now(), PublicKey: "ssh-rsa SHA256:def"},
+	}})
+	lines := strings.Split(strings.TrimSuffix(logs, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d: %q", len(lines), logs)
+	}
+	if !strings.Contains(lines[0], `user="root"`) || !strings.Contains(lines[0], `publickey="ssh-ed25519 SHA256:abc"`) {
+		t.Errorf("line 0 = %q", lines[0])
+	}
+	if !strings.Contains(lines[1], `publickey="ssh-rsa SHA256:def"`) || strings.Contains(lines[1], "user=") {
+		t.Errorf("line 1 = %q", lines[1])
+	}
+}
+
+func TestBlocklistDe_PublicKeyIsLimitedAndEscaped(t *testing.T) {
+	b := newBlocklistDeForTest(nil)
+	logs := b.buildLogs(Report{IP: "198.51.100.9", Protocol: "SSH", Creds: []Credential{
+		{Time: time.Now(), PublicKey: "ssh-rsa SHA256:x\n" + strings.Repeat("k", 1000)},
+	}})
+	if strings.Count(logs, "\n") != 1 || len(logs) > 400 {
+		t.Errorf("key must be escaped and truncated: %d bytes, %q", len(logs), logs)
+	}
+}
+
+// A client that only offers public keys, with usernames and passwords switched off, still sends real log content:
+// the API rejects "logs" with fewer than 20 characters.
+func TestBlocklistDe_KeyOnlyAttemptsThroughManagerSendEnoughData(t *testing.T) {
+	hook := captureLogs(t)
+	rec := newRecorder(200, blOK)
+	b := newBlocklistDeForTest(rec, func(b *blocklistDeBackend) { b.reportClearUsername = false })
+	m := stoppable(t, NewManager([]Backend{b}, 2, time.Hour, time.Hour, time.Hour))
+
+	m.RecordKeyFailure("203.0.113.41", "SSH", "root", "ssh-ed25519", "SHA256:aaa")
+	if !m.RecordKeyFailure("203.0.113.41", "SSH", "root", "ssh-rsa", "SHA256:bbb") {
+		t.Fatal("expected a report at the threshold")
+	}
+	hook.waitFor(t, "IP 203.0.113.41 reported")
+
+	logs := rec.only(t).form.Get("logs")
+	if len(strings.TrimSpace(logs)) <= 20 {
+		t.Errorf("logs too short for the API: %q", logs)
+	}
+	for _, want := range []string{`publickey="ssh-ed25519 SHA256:aaa"`, `publickey="ssh-rsa SHA256:bbb"`, "from 203.0.113.41"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("logs lack %s: %q", want, logs)
+		}
+	}
+	if strings.Contains(logs, "root") {
+		t.Error("username must not be sent while BLOCKLIST_REPORT_CLEAR_USERNAME is off")
+	}
+}
+
+// Whatever was collected, the logs field is never shorter than what the API accepts.
+func TestBlocklistDe_LogsNeverTooShort(t *testing.T) {
+	b := newBlocklistDeForTest(nil, func(b *blocklistDeBackend) { b.reportClearUsername = false })
+	for _, rep := range []Report{
+		{IP: "1.2.3.4", Protocol: "SSH"},
+		{IP: "1.2.3.4", Protocol: "SSH", Creds: []Credential{{Time: time.Now()}}},
+		{IP: "1.2.3.4", Protocol: "Telnet", Creds: creds("", "")},
+	} {
+		if logs := b.buildLogs(rep); len(strings.TrimSpace(logs)) <= 20 {
+			t.Errorf("logs %q too short for %+v", logs, rep)
+		}
+	}
+}
+
 // ── response parsing ─────────────────────────────────────────────────────────
 
 func TestParseBlocklistDeResponse(t *testing.T) {
@@ -386,9 +466,9 @@ func TestNewBlocklistDeFromEnv_Defaults(t *testing.T) {
 		)
 	}
 
-	if blocklistFields["BLOCKLIST_ENABLED"] != true ||
-		blocklistFields["BLOCKLIST_SSH_SERVICE"] != "ssh-auth" {
-		t.Errorf("blocklist fields = %v", blocklistFields)
+	// Everything but ENABLED has its default value and is therefore not shown.
+	if len(blocklistFields) != 1 || blocklistFields["BLOCKLIST_ENABLED"] != true {
+		t.Errorf("only BLOCKLIST_ENABLED may be shown with defaults: %v", blocklistFields)
 	}
 
 	for k, v := range blocklistFields {
@@ -424,10 +504,14 @@ func TestNewBlocklistDeFromEnv_HashedOverridesClear(t *testing.T) {
 		)
 	}
 
-	if b.reportClearPassword ||
-		!b.reportHashedPassword ||
-		blocklistFields["BLOCKLIST_REPORT_CLEAR_PASSWORD"] != false {
-		t.Fatalf("hashed must override clear: %+v / %v", b, blocklistFields)
+	if b.reportClearPassword || !b.reportHashedPassword {
+		t.Fatalf("hashed must override clear: %+v", b)
+	}
+	// Effective values equal the defaults (false / true), so neither is shown.
+	for _, k := range []string{"BLOCKLIST_REPORT_CLEAR_PASSWORD", "BLOCKLIST_REPORT_HASHED_PASSWORD"} {
+		if _, ok := blocklistFields[k]; ok {
+			t.Errorf("%s has its default value and must not be shown: %v", k, blocklistFields)
+		}
 	}
 
 }
@@ -525,8 +609,8 @@ func TestSetup_BlocklistDeRegistered(t *testing.T) {
 		)
 	}
 
-	if abuseFields["ABUSE_REPORT_ATTEMPTS"] != 10 {
-		t.Errorf("abuse fields = %v", abuseFields)
+	if _, ok := abuseFields["ABUSE_REPORT_ATTEMPTS"]; ok {
+		t.Errorf("default ABUSE_REPORT_ATTEMPTS must not be shown: %v", abuseFields)
 	}
 
 	blocklistFields, ok := abuseFields["blocklist"].(logrus.Fields)

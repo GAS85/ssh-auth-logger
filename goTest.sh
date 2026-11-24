@@ -6,6 +6,9 @@
 echo "Run gofmt"
 find . -type f -name "*.go" -exec gofmt -w {} \;
 
+echo "Run go vet..."
+go vet ./...
+
 echo "Run test with cover"
 go test ./... -cover
 

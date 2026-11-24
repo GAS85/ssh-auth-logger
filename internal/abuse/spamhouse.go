@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
 )
 
@@ -67,11 +68,15 @@ func newSpamhausFromEnv() (Backend, logrus.Fields) {
 		},
 	}
 
+	// Build static part for startup output
+	spamhausFields := logrus.Fields{
+		"SPAMHAUS_ENABLED": true,
+	}
+	// Only displayed when different from defaults
+	startup.AddIfNotDefault(spamhausFields, "SPAMHAUS_THREAT_TYPE", b.threatType, "attack")
+
 	return b, logrus.Fields{
-		"spamhouse": logrus.Fields{
-			"SPAMHAUS_ENABLED":     true,
-			"SPAMHAUS_THREAT_TYPE": b.threatType,
-		},
+		"spamhaus": spamhausFields,
 	}
 }
 

@@ -448,9 +448,9 @@ func TestNewAbuseIPDBFromEnv_Defaults(t *testing.T) {
 		)
 	}
 
-	if abuseIPDBFields["ABUSEIPDB_ENABLED"] != true ||
-		abuseIPDBFields["ABUSEIPDB_REPORT_HASHED_PASSWORD"] != true {
-		t.Errorf("abuseipdb fields = %v", abuseIPDBFields)
+	// Only ENABLED is shown while everything else has its default value.
+	if len(abuseIPDBFields) != 1 || abuseIPDBFields["ABUSEIPDB_ENABLED"] != true {
+		t.Errorf("only ABUSEIPDB_ENABLED may be shown with defaults: %v", abuseIPDBFields)
 	}
 
 	for k, v := range abuseIPDBFields {
@@ -486,8 +486,16 @@ func TestNewAbuseIPDBFromEnv_Overrides(t *testing.T) {
 	}
 
 	if abuseIPDBFields["ABUSEIPDB_SSH_CATEGORIES"] != "18" ||
+		abuseIPDBFields["ABUSEIPDB_TELNET_CATEGORIES"] != "14" ||
+		abuseIPDBFields["ABUSEIPDB_REPORT_CLEAR_USERNAME"] != true ||
 		abuseIPDBFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] != true {
 		t.Errorf("abuseipdb fields = %v", abuseIPDBFields)
+	}
+	if v, ok := abuseIPDBFields["ABUSEIPDB_REPORT_HASHED_PASSWORD"]; !ok || v != false {
+		t.Errorf("non-default HASHED_PASSWORD=false must be shown: %v", abuseIPDBFields)
+	}
+	if _, ok := abuseIPDBFields["ABUSEIPDB_IP_CHECK"]; ok {
+		t.Error("default IP_CHECK must not be shown")
 	}
 
 }
@@ -506,11 +514,12 @@ func TestNewAbuseIPDBFromEnv_HashedOverridesClearPassword(t *testing.T) {
 		t.Fatalf("fields[abuseipdb] = %T, want logrus.Fields", fields["abuseipdb"])
 	}
 
-	if abuseIPDBFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"] != false {
-		t.Errorf(
-			"startup log must show the effective clear-password value, got %v",
-			abuseIPDBFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"],
-		)
+	// The effective value (false) equals the default, so it is not shown at all.
+	if _, ok := abuseIPDBFields["ABUSEIPDB_REPORT_CLEAR_PASSWORD"]; ok {
+		t.Errorf("effective clear-password is false (default), must not be shown: %v", abuseIPDBFields)
+	}
+	if _, ok := abuseIPDBFields["ABUSEIPDB_REPORT_HASHED_PASSWORD"]; ok {
+		t.Errorf("hashed is the default, must not be shown: %v", abuseIPDBFields)
 	}
 	if _, p := b.Sanitize("u", "secret"); p == "secret" {
 		t.Error("cleartext password would be transmitted")
