@@ -113,6 +113,7 @@ func TestStats_SimulatedDropsAreCounted(t *testing.T) {
 	s := freshStats(t)
 	const n = 300
 	var wg sync.WaitGroup
+	simulatedDropOneIn = 10 // always drop
 	for i := 0; i < n; i++ {
 		srv, cli := net.Pipe()
 		cli.Close() // the handshake of a non-dropped connection fails at once

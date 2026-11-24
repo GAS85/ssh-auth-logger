@@ -36,7 +36,8 @@ func TestMain(m *testing.M) {
 	maxAuthTries = 1
 	logClearPassword = true
 	telnetLogClearPassword = true
-	telnetCloseDelay = 0 // the real 2 s pause per telnet attempt made the whole suite take two minutes
+	telnetCloseDelay = 0   // the real 2 s pause per telnet attempt made the whole suite take two minutes
+	simulatedDropOneIn = 0 // no random drops: tests must be deterministic
 	os.Exit(m.Run())
 }
 
@@ -2435,5 +2436,29 @@ func TestHexPreview_IsBounded(t *testing.T) {
 	got := hexPreview(strings.Repeat("\xff", 100))
 	if want := strings.Repeat("ff", 32) + "..."; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSSH_SimulatedDropClosesConnection(t *testing.T) {
+	old := simulatedDropOneIn
+	simulatedDropOneIn = 1 // always drop
+	defer func() { simulatedDropOneIn = old }()
+
+	before := stats.DroppedConnections.Load()
+	addr := startSSHServer(t)
+
+	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(3 * time.Second))
+
+	if n, _ := c.Read(make([]byte, 64)); n != 0 {
+		t.Errorf("dropped connection must send nothing, got %d bytes", n)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if stats.DroppedConnections.Load() <= before {
+		t.Error("DroppedConnections should have increased")
 	}
 }

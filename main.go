@@ -76,6 +76,9 @@ var (
 	// readLine now stops after telnetReadDeadline seconds in total.
 	// Variable so tests can shorten it
 	telnetReadDeadline = 30 * time.Second
+
+	// simulatedDropOneIn makes handleConnection drop roughly one in N connections right after accept, to look like a flaky real host. 0 disables it. Variable so tests are deterministic.
+	simulatedDropOneIn = 10
 )
 
 // rateLimitedConn is a wrapper around net.Conn that limits the bandwidth.
@@ -1090,7 +1093,7 @@ var sshConnTimeout = 2 * time.Minute
 
 func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	// Random early disconnect (~10%)
-	if rand.Intn(10) == 0 {
+	if simulatedDropOneIn > 0 && rand.Intn(simulatedDropOneIn) == 0 {
 		stats.DroppedConnections.Add(1)
 		dropFields := connLogParameters(conn)
 		src, _ := dropFields["src"].(string)
