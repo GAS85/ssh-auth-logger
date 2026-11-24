@@ -21,16 +21,13 @@ FROM alpine:latest
 ARG VERSION=dev
 ARG VCS_REF=dev
 ARG BUILD_DATE=unknown
-ARG LABEL_MAINTAINER="Justin Azoff <justin.azoff@gmail.com>"
-ARG LABEL_IMAGE_SOURCE="JustinAzoff/ssh-auth-logger"
-ARG LABEL_IMAGE_URL="justinazoff/ssh-auth-logger"
 
-LABEL maintainer="$LABEL_MAINTAINER" \
+LABEL maintainer="GAS85 <v4adezwcd@mozmail.com>" \
       org.opencontainers.image.title="ssh-auth-logger" \
-      org.opencontainers.image.description="A low/zero interaction ssh authentication logging honeypot" \
-      org.opencontainers.image.source="https://github.com/$LABEL_IMAGE_SOURCE" \
-      org.opencontainers.image.url="https://hub.docker.com/r/$LABEL_IMAGE_URL" \
-      org.opencontainers.image.documentation="https://github.com/$LABEL_IMAGE_SOURCE#" \
+      org.opencontainers.image.description="A low/zero interaction ssh and telnet authentication logging honeypot with web UI. Can report IP to AbuseIPDB, OTX, dshield, blocklist and spamhaus." \
+      org.opencontainers.image.source="https://github.com/GAS85/ssh-auth-logger" \
+      org.opencontainers.image.url="https://hub.docker.com/r/GAS85/ssh-auth-logger" \
+      org.opencontainers.image.documentation="https://github.com/GAS85/ssh-auth-logger#" \
       org.opencontainers.image.version=$VERSION \
       org.opencontainers.image.revision=$VCS_REF \
       org.opencontainers.image.version=$VERSION

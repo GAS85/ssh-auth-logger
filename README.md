@@ -1,6 +1,6 @@
 # SSH Auth Logger
 
-A low/zero interaction ssh authentication logging honeypot. Initially developed by [JustinAzoff](https://github.com/JustinAzoff).
+A low/zero interaction ssh authentication logging honeypot. Initially developed by [JustinAzoff](https://github.com/JustinAzoff) and reworked in [v2](https://github.com/GAS85/ssh-auth-logger/releases#release-v2.0.0).
 
 [![Dev Build](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml/badge.svg?branch=dev)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/docker-dev.yml)
 [![Test Automation](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml/badge.svg)](https://github.com/GAS85/ssh-auth-logger/actions/workflows/go-test.yml)

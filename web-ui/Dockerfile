@@ -11,11 +11,11 @@ ARG BUILD_DATE=unknown
 
 ENV DASHBOARD_PORT=$DASHBOARD_PORT
 
-LABEL maintainer="GAS85" \
-      org.opencontainers.image.title="ssh-auth-logger" \
-      org.opencontainers.image.description="A low/zero interaction ssh authentication logging honeypot" \
+LABEL maintainer="GAS85 <v4adezwcd@mozmail.com>" \
+      org.opencontainers.image.title="ssh-auth-logger-webui" \
+      org.opencontainers.image.description="WebUI for a ssh-auth-logger - low/zero interaction ssh and telnet authentication logging honeypot. Can report IP to AbuseIPDB, OTX, dshield, blocklist and spamhaus." \
       org.opencontainers.image.source="https://github.com/GAS85/ssh-auth-logger/web-ui" \
-      org.opencontainers.image.url="https://hub.docker.com/r/GAS85/ssh-auth-logger@latest-webui" \
+      org.opencontainers.image.url="https://hub.docker.com/r/GAS85/ssh-auth-logger" \
       org.opencontainers.image.documentation="https://github.com/GAS85/ssh-auth-logger/web-ui/README.md" \
       org.opencontainers.image.version=$VERSION \
       org.opencontainers.image.revision=$VCS_REF \
