@@ -643,6 +643,9 @@ func TestNewOTXFromEnv_InvalidConfigIsFatal(t *testing.T) {
 		{"unknown tlp", []string{"OTX_TLP", "purple"}, "OTX_TLP"},
 		{"public amber", []string{"OTX_TLP", "amber"}, "OTX_TLP"},
 		{"public red", []string{"OTX_TLP", "red"}, "OTX_TLP"},
+		{"name too short", []string{"OTX_PULSE_NAME", "mine"}, "OTX_PULSE_NAME"},
+		{"name too long", []string{"OTX_PULSE_NAME", strings.Repeat("n", otxMaxNameLen+1)}, "OTX_PULSE_NAME"},
+		{"name too short in characters", []string{"OTX_PULSE_NAME", "üüüü"}, "OTX_PULSE_NAME"}, // 8 bytes, 4 characters
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1220,6 +1223,81 @@ func TestOTX_PulseDescriptionMentionsPublicKeysOnlyWhenShared(t *testing.T) {
 			if got := strings.Contains(d, "public keys"); got != tc.want {
 				t.Errorf("description %q: mentions public keys = %v, want %v", d, got, tc.want)
 			}
+		})
+	}
+}
+
+func TestOTX_PulseDescriptionStatesBatchIntervalAndRepeatedIPs(t *testing.T) {
+	cases := []struct {
+		name string
+		mod  func(*otxBackend)
+		want string
+	}{
+		{"configured string is used as written", func(b *otxBackend) { b.flushEveryStr = "90m" }, "about every 90m (sooner"},
+		{"falls back to the parsed duration", func(b *otxBackend) { b.flushEvery = 30 * time.Minute }, "about every 30m0s (sooner"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newOTXForTest("", tc.mod).pulseDescription()
+			if !strings.Contains(d, tc.want) {
+				t.Errorf("description %q lacks %q", d, tc.want)
+			}
+			if strings.Contains(d, "updated every") || strings.Contains(d, "appear multiple") {
+				t.Errorf("description still has the old wording: %q", d)
+			}
+			if !strings.Contains(d, "added again in a later update.") {
+				t.Errorf("description %q does not explain repeated IPs", d)
+			}
+		})
+	}
+}
+
+// The configured interval must reach the description when the backend is built from the environment.
+func TestNewOTXFromEnv_IntervalIsInPulseDescription(t *testing.T) {
+	useEnv(t, "OTX_ENABLED", "true", "OTX_API_KEY", "k", "OTX_BATCH_INTERVAL", "45m")
+	b, _ := newOTXFromEnv()
+	ob := b.(*otxBackend)
+	t.Cleanup(ob.stop)
+	if d := ob.pulseDescription(); !strings.Contains(d, "about every 45m (sooner") {
+		t.Errorf("description %q lacks the configured interval", d)
+	}
+}
+
+// OTX counts characters, not bytes, and the limits are inclusive.
+func TestNewOTXFromEnv_PulseNameLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		pulseID     string
+		fatal       bool
+	}{
+		{"minimum", "12345", "", false},
+		{"maximum", strings.Repeat("n", otxMaxNameLen), "", false},
+		{"multibyte minimum", "üüüüü", "", false}, // 10 bytes, 5 characters
+		{"multibyte maximum", strings.Repeat("ü", otxMaxNameLen), "", false},
+		{"one too short", "1234", "", true},
+		{"one too long", strings.Repeat("n", otxMaxNameLen+1), "", true},
+		{"multibyte too long", strings.Repeat("ü", otxMaxNameLen+1), "", true},
+		// With an existing pulse the name is never sent.
+		{"short name ignored with pulse id", "ab", "42", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kv := []string{"OTX_ENABLED", "true", "OTX_API_KEY", "k", "OTX_PULSE_NAME", tc.value}
+			if tc.pulseID != "" {
+				kv = append(kv, "OTX_PULSE_ID", tc.pulseID)
+			}
+			useEnv(t, kv...)
+			if tc.fatal {
+				msg := expectFatal(t, func() { newOTXFromEnv() })
+				if !strings.Contains(msg, "OTX_PULSE_NAME") || !strings.Contains(msg, "5-200") {
+					t.Errorf("message %q should name OTX_PULSE_NAME and the 5-200 limit", msg)
+				}
+				return
+			}
+			b, _ := newOTXFromEnv()
+			if b == nil {
+				t.Fatal("backend not created")
+			}
+			t.Cleanup(b.(*otxBackend).stop)
 		})
 	}
 }

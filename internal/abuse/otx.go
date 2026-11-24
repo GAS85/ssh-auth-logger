@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GAS85/ssh-auth-logger/internal/startup"
 	"github.com/sirupsen/logrus"
@@ -37,6 +38,10 @@ const (
 
 	// If the API is unreachable, keep at most batchSize*otxMaxQueueFactor indicators; the oldest are dropped first.
 	otxMaxQueueFactor = 4
+
+	// OTX accepts pulse names of 5 to 200 characters and answers 400 otherwise.
+	otxMinNameLen = 5
+	otxMaxNameLen = 200
 
 	// Title and Description are limited to 1024, so common limiter used
 	otxMaxCommentLen = 1024
@@ -93,6 +98,8 @@ type otxBackend struct {
 
 	batchSize  int
 	flushEvery time.Duration
+	// flushEveryStr is OTX_BATCH_INTERVAL as the user wrote it (e.g. "1h"), used in the pulse description.
+	flushEveryStr string
 
 	httpClient *http.Client
 
@@ -168,6 +175,13 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 		logrus.Fatal("Invalid OTX_TLP environment variable: white is not allowed with OTX_REPORT_CLEAR_USERNAME or OTX_REPORT_HASHED_PASSWORD (use green or higher)")
 	}
 
+	pulseName := getenv("OTX_PULSE_NAME", otxDefaultPulseName)
+	pulseID := getenv("OTX_PULSE_ID", "")
+	// The name is only sent when a new pulse is created. With OTX_PULSE_ID the existing pulse is edited and its name is never touched, so it is not checked then.
+	if n := utf8.RuneCountInString(pulseName); pulseID == "" && (n < otxMinNameLen || n > otxMaxNameLen) {
+		logrus.Fatalf("Invalid OTX_PULSE_NAME environment variable: OTX requires %d-%d characters, got %d", otxMinNameLen, otxMaxNameLen, n)
+	}
+
 	var tags []string
 	for _, t := range strings.Split(getenv("OTX_TAGS", "honeypot,ssh,telnet,brute-force"), ",") {
 		if t = strings.TrimSpace(t); t != "" {
@@ -179,8 +193,8 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 		apiKey:  apiKey,
 		baseURL: otxDefaultBaseURL,
 
-		pulseName: getenv("OTX_PULSE_NAME", otxDefaultPulseName),
-		pulseID:   getenv("OTX_PULSE_ID", ""),
+		pulseName: pulseName,
+		pulseID:   pulseID,
 		public:    public,
 		tlp:       tlp,
 		tags:      tags,
@@ -191,8 +205,9 @@ func newOTXFromEnv() (Backend, logrus.Fields) {
 		reportClearPassword:  clearPassword,
 		reportHashedPassword: hashedPassword,
 
-		batchSize:  batchSize,
-		flushEvery: flushEvery,
+		batchSize:     batchSize,
+		flushEvery:    flushEvery,
+		flushEveryStr: flushEveryStr,
 
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
@@ -276,9 +291,17 @@ func (b *otxBackend) describe(ind otxIndicator) string {
 	return truncateUTF8(strings.Join(parts, "; "), otxMaxCommentLen)
 }
 
+// batchInterval is the flush interval for the pulse description: OTX_BATCH_INTERVAL as configured, or the parsed duration if only that is set.
+func (b *otxBackend) batchInterval() string {
+	if b.flushEveryStr != "" {
+		return b.flushEveryStr
+	}
+	return b.flushEvery.String()
+}
+
 // pulseDescription is the description of a new pulse. It says that no credentials are shared only if that is true.
 func (b *otxBackend) pulseDescription() string {
-	d := "Source IPs of SSH/Telnet password guessing observed by an GAS85/ssh-auth-logger honeypot (" + otxReferenceURL + ")."
+	d := "Source IPs of SSH/Telnet password guessing observed by a GAS85/ssh-auth-logger honeypot (" + otxReferenceURL + "). New indicators are added in batches, about every " + b.batchInterval() + ", or sooner when a batch fills up. The same IP may be added again in a later update."
 
 	var shared []string
 	if b.reportClearUsername {
