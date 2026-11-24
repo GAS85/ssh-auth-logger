@@ -1233,8 +1233,8 @@ func TestOTX_PulseDescriptionStatesBatchIntervalAndRepeatedIPs(t *testing.T) {
 		mod  func(*otxBackend)
 		want string
 	}{
-		{"configured string is used as written", func(b *otxBackend) { b.flushEveryStr = "90m" }, "about every 90m (sooner"},
-		{"falls back to the parsed duration", func(b *otxBackend) { b.flushEvery = 30 * time.Minute }, "about every 30m0s (sooner"},
+		{"configured string is used as written", func(b *otxBackend) { b.flushEveryStr = "90m" }, "about every 90m, or sooner"},
+		{"falls back to the parsed duration", func(b *otxBackend) { b.flushEvery = 30 * time.Minute }, "about every 30m0s, or sooner"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1258,7 +1258,7 @@ func TestNewOTXFromEnv_IntervalIsInPulseDescription(t *testing.T) {
 	b, _ := newOTXFromEnv()
 	ob := b.(*otxBackend)
 	t.Cleanup(ob.stop)
-	if d := ob.pulseDescription(); !strings.Contains(d, "about every 45m (sooner") {
+	if d := ob.pulseDescription(); !strings.Contains(d, "about every 45m, or sooner") {
 		t.Errorf("description %q lacks the configured interval", d)
 	}
 }
