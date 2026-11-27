@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GAS85/ssh-auth-logger/internal/abuse"
 	"github.com/sirupsen/logrus"
@@ -2460,5 +2461,96 @@ func TestSSH_SimulatedDropClosesConnection(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if stats.DroppedConnections.Load() <= before {
 		t.Error("DroppedConnections should have increased")
+	}
+}
+
+// ── SSH binary credentials ───────────────────────────────────────────────────
+
+// Scanners push exploit or fuzzing payloads into the SSH password field. The log must keep the bytes (as \xNN escapes, not U+FFFD) and reporting services must not receive them.
+const sshBinaryPassword = "H\x8b\x05#\x01H\x8b8\x02\x0f\xa0=\x0e"
+
+func TestSSH_NonUTF8PasswordIsEscapedInLog(t *testing.T) {
+	hook := &logHook{}
+	logrus.AddHook(hook)
+	defer func() { logrus.StandardLogger().ReplaceHooks(logrus.LevelHooks{}) }()
+
+	addr := startSSHServer(t)
+	dialSSH(addr, sshClientCfg("scanner", ssh.Password(sshBinaryPassword)))
+	time.Sleep(200 * time.Millisecond)
+
+	want := loggableText(sshBinaryPassword)
+	if strings.ContainsRune(want, utf8.RuneError) || !strings.Contains(want, `\x8b`) {
+		t.Fatalf("test setup: %q is not escaped", want)
+	}
+	var found bool
+	for _, e := range hook.Entries {
+		if e.Message == "Request with password" && fmt.Sprint(e.Data["password"]) == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a log entry with password %q", want)
+	}
+}
+
+func TestSSH_BinaryPasswordIsCountedButNotReported(t *testing.T) {
+	reports := installReporter(t, 1, nil)
+	before := stats.SSHPasswords.Load()
+
+	addr := startSSHServer(t)
+	dialSSH(addr, sshClientCfg("scanner", ssh.Password(sshBinaryPassword)))
+	time.Sleep(200 * time.Millisecond)
+
+	if got := stats.SSHPasswords.Load() - before; got < 1 {
+		t.Errorf("the attempt must still be counted, SSHPasswords grew by %d", got)
+	}
+	select {
+	case r := <-reports:
+		t.Fatalf("binary password must not be reported: %+v", r)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestSSH_NonUTF8UsernameIsEscapedWhenReported(t *testing.T) {
+	reports := installReporter(t, 1, nil)
+
+	addr := startSSHServer(t)
+	dialSSH(addr, sshClientCfg("\xcc\xd1\xd1\xca", ssh.Password("letmein")))
+
+	r := waitReport(t, reports)
+	if len(r.Creds) != 1 || r.Creds[0].Username != `\xcc\xd1\xd1\xca` || r.Creds[0].Password != "letmein" {
+		t.Errorf("creds = %+v, want escaped username and plain password", r.Creds)
+	}
+}
+
+func TestSSH_NonUTF8PasswordWithoutControlBytesIsReportedEscaped(t *testing.T) {
+	// A legacy-encoded (GBK) password is a real attempt: reported, escaped.
+	reports := installReporter(t, 1, nil)
+
+	addr := startSSHServer(t)
+	dialSSH(addr, sshClientCfg("root", ssh.Password("\xcb\xcd\xdb\xcc")))
+
+	r := waitReport(t, reports)
+	if len(r.Creds) != 1 || r.Creds[0].Password != `\xcb\xcd\xdb\xcc` {
+		t.Errorf("creds = %+v", r.Creds)
+	}
+}
+
+func TestSSH_BinaryUsernameIsCountedButNotReported(t *testing.T) {
+	// "\x03\x00\x00\x13" is the TPKT header of an RDP connection request.
+	reports := installReporter(t, 1, nil)
+	before := stats.SSHPasswords.Load()
+
+	addr := startSSHServer(t)
+	dialSSH(addr, sshClientCfg("\x03\x00\x00\x13", ssh.Password("letmein")))
+	time.Sleep(200 * time.Millisecond)
+
+	if stats.SSHPasswords.Load() <= before {
+		t.Error("the attempt must still be counted")
+	}
+	select {
+	case r := <-reports:
+		t.Fatalf("binary username must not be reported: %+v", r)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
