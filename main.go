@@ -508,7 +508,7 @@ func logParameters(conn ssh.ConnMetadata) logrus.Fields {
 	dst, dpt, _ := net.SplitHostPort(conn.LocalAddr().String())
 
 	return logrus.Fields{
-		"duser": conn.User(),
+		"duser": loggableText(conn.User()), // \xNN escapes for non-UTF-8 names instead of U+FFFD
 		//"session_id":          string(conn.SessionID()),
 		"src":            src,
 		"spt":            spt,
@@ -950,7 +950,7 @@ func makeSSHConfig(conn net.Conn) (ssh.ServerConfig, error) {
 			var loggedPassword any = password
 			// This will convert bytes to string if logClearPassword is true, otherwise it will log the byte slice (which will be base64 encoded if LogClearPassword is false)
 			if logClearPassword {
-				loggedPassword = string(password)
+				loggedPassword = loggableText(string(password)) // \xNN escapes instead of U+FFFD
 			}
 
 			ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
@@ -962,13 +962,13 @@ func makeSSHConfig(conn net.Conn) (ssh.ServerConfig, error) {
 					"server_key_type": actualHostKeyType,
 				}).Log(attemptLogLevel(ip), "Request with password")
 
-			// AbuseIPDB reporting
-			if err == nil && reportableIP(ip) {
+			// Abuse reporting. Binary blobs (exploit/fuzzing payloads in the user or password field) are logged and counted, but not reported: they are not credentials. Text is escaped like in the log.
+			if err == nil && reportableIP(ip) && !isBinaryProbe(conn.User()) && !isBinaryProbe(string(password)) {
 				abuseReporter.RecordFailure(
 					ip,
 					"SSH",
-					conn.User(),
-					string(password),
+					loggableText(conn.User()),
+					loggableText(string(password)),
 				)
 			}
 
@@ -994,11 +994,11 @@ func makeSSHConfig(conn net.Conn) (ssh.ServerConfig, error) {
 
 			// AbuseIPDB reporting.
 			// Password attempts and public-key attempts both count toward the same IP threshold
-			if err == nil && reportableIP(ip) {
+			if err == nil && reportableIP(ip) && !isBinaryProbe(conn.User()) {
 				abuseReporter.RecordKeyFailure(
 					ip,
 					"SSH",
-					conn.User(),
+					loggableText(conn.User()),
 					key.Type(),
 					ssh.FingerprintSHA256(key),
 				)

@@ -110,10 +110,14 @@ func TestStats_OpenSSHConnectionsGauge(t *testing.T) {
 }
 
 func TestStats_SimulatedDropsAreCounted(t *testing.T) {
+	// TestMain switches the random drop off; this test is about exactly that behavior.
+	old := simulatedDropOneIn
+	simulatedDropOneIn = 10
+	defer func() { simulatedDropOneIn = old }()
+
 	s := freshStats(t)
 	const n = 300
 	var wg sync.WaitGroup
-	simulatedDropOneIn = 10 // always drop
 	for i := 0; i < n; i++ {
 		srv, cli := net.Pipe()
 		cli.Close() // the handshake of a non-dropped connection fails at once
